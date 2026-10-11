@@ -24,7 +24,9 @@ import fast_comment as core
 from job_control import remaining_seconds, format_duration
 from app_paths import (APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, worker_command,
                        OutputPreferences, load_output_preferences, save_output_preferences,
-                       resolve_output_directory, completed_output_folder)
+                       resolve_output_directory, completed_output_folder,
+                       StoragePreferences, load_storage_preferences, save_storage_preferences,
+                       work_directory_for_output)
 
 HERE = APP_DIR
 SETTINGS_PATH = SETTINGS_FILE
@@ -59,6 +61,12 @@ class FastCommentGUI:
             messagebox.showwarning("出力先設定の読み込み失敗", f"既定の出力先で起動します。\n{exc}")
             output_prefs = OutputPreferences()
         self.output_directory = tk.StringVar(value=output_prefs.directory)
+        try:
+            cache_prefs = load_storage_preferences()
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            messagebox.showwarning("元動画の保存先設定", f"既定の保存先で起動します。\\n{exc}")
+            cache_prefs = StoragePreferences()
+        self.cache_directory = tk.StringVar(value=cache_prefs.cache_directory)
         self.open_on_complete = tk.BooleanVar(value=output_prefs.open_on_complete)
         self._completed_file: Path | None = None
         self.vod = tk.StringVar()
@@ -190,6 +198,14 @@ class FastCommentGUI:
         ttk.Button(dest_row, text="保存", command=lambda: self.save_output_preferences(show=True)).pack(side="left", padx=(6, 0))
         ttk.Checkbutton(opts, text="変換が完了したら保存先フォルダを自動で開く",
                         variable=self.open_on_complete, command=self.save_output_preferences).pack(anchor="w", pady=(2, 0))
+        cache_row = ttk.Frame(opts)
+        cache_row.pack(fill="x", pady=4)
+        ttk.Label(cache_row, text="元動画・JSON保存先", width=18).pack(side="left")
+        ttk.Entry(cache_row, textvariable=self.cache_directory).pack(side="left", fill="x", expand=True)
+        ttk.Button(cache_row, text="参照…", command=self.browse_cache_directory).pack(side="left", padx=(8, 0))
+        ttk.Button(cache_row, text="保存", command=lambda: self.save_cache_preferences(show=True)).pack(side="left", padx=(6, 0))
+        ttk.Label(opts, text="大容量の一時ファイルは出力先ドライブに保存・正常終了後に削除します。元動画の場所は移動しません。",
+                  foreground="#555").pack(anchor="w")
         test = ttk.LabelFrame(frame, text="テスト範囲", padding=12)
         test.pack(fill="x", pady=(12, 0))
         ttk.Checkbutton(test, text="30秒だけ動画を書き出して確認（推奨）", variable=self.preview,
@@ -314,6 +330,25 @@ class FastCommentGUI:
         path = filedialog.askopenfilename(parent=self.root, title=title, filetypes=filetypes)
         if path:
             variable.set(path)
+
+    def browse_cache_directory(self):
+        current = Path(self.cache_directory.get().strip()).expanduser()
+        start = current if current.is_dir() else CACHE_DIR.parent
+        chosen = filedialog.askdirectory(parent=self.root, title="元動画とJSONの保存先", initialdir=str(start))
+        if chosen:
+            self.cache_directory.set(chosen)
+            self.save_cache_preferences()
+
+    def save_cache_preferences(self, *, show=False):
+        try:
+            directory = resolve_output_directory(self.cache_directory.get())
+            save_storage_preferences(StoragePreferences(str(directory)))
+            if show:
+                messagebox.showinfo("保存しました", "元動画とJSONの保存先を記憶しました。以前の動画は移動されません。")
+            return True
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("元動画保存先の設定失敗", str(exc))
+            return False
 
     def browse_output_directory(self):
         current = Path(self.output_directory.get().strip()).expanduser()
@@ -469,7 +504,7 @@ class FastCommentGUI:
         if path is None:
             try:
                 vod = core.normalize_id(self.vod.get())
-                path = CACHE_DIR / (vod + ".json")
+                path = resolve_output_directory(self.cache_directory.get()) / (vod + ".json")
             except ValueError:
                 path = None
         if path is None or not path.is_file():
@@ -512,9 +547,9 @@ class FastCommentGUI:
             if video is None or chat is None:
                 vod_id = core.normalize_id(self.vod.get())
                 if video is None:
-                    video = CACHE_DIR / (vod_id + ".mp4")
+                    video = resolve_output_directory(self.cache_directory.get()) / (vod_id + ".mp4")
                 if chat is None:
-                    chat = CACHE_DIR / (vod_id + ".json")
+                    chat = resolve_output_directory(self.cache_directory.get()) / (vod_id + ".json")
             if not video.is_file() or not chat.is_file():
                 raise ValueError("実描画にはダウンロード済みの動画とチャットJSONが必要です。動画・出力タブで指定するか、先に30秒テストを実行してください。")
             requested_time = self.start_time.get()
@@ -576,7 +611,7 @@ class FastCommentGUI:
             path = Path(self.video.get().strip()) if self.video.get().strip() else None
             if path is None:
                 vod = core.normalize_id(self.vod.get())
-                path = CACHE_DIR / (vod + ".mp4")
+                path = resolve_output_directory(self.cache_directory.get()) / (vod + ".mp4")
             if not path.is_file() or not path.stat().st_size:
                 raise ValueError("動画を選ぶか、Originalsに元MP4を保存してください")
             seconds = core.parse_time(self.start_time.get()) if self.time_mode.get() == "manual" else self._preview_start
@@ -662,7 +697,7 @@ class FastCommentGUI:
         except (ValueError, OSError) as exc:
             messagebox.showerror("入力の確認", str(exc))
             return
-        if not self.save_output_preferences():
+        if not self.save_output_preferences() or not self.save_cache_preferences():
             return
         self.save_settings()
         try:
@@ -670,7 +705,10 @@ class FastCommentGUI:
         except OSError as exc:
             messagebox.showerror("起動エラー", str(exc))
             return
-        args += ["--output-dir", str(resolve_output_directory(self.output_directory.get()))]
+        output_dir = resolve_output_directory(self.output_directory.get())
+        args += ["--output-dir", str(output_dir)]
+        args += ["--cache-dir", str(resolve_output_directory(self.cache_directory.get()))]
+        args += ["--work-dir", str(work_directory_for_output(output_dir))]
         if vod_id:
             args += ["--vod", vod_id]
         if self.video.get().strip():
@@ -846,7 +884,7 @@ class FastCommentGUI:
             return
         if self._settings_job is not None:
             self.root.after_cancel(self._settings_job)
-        if not self.save_output_preferences():
+        if not self.save_output_preferences() or not self.save_cache_preferences():
             return
         self.save_settings()
         self.root.destroy()
