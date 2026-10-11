@@ -7,6 +7,26 @@ on:
   workflow_dispatch:
 
 jobs:
+  actual-sample-preview:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: FFmpeg and Japanese font prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg fonts-noto-cjk
+      - name: Render actual moving ASS sample video
+        run: python -m scripts.sample_render_smoke
+
   build-and-test:
     runs-on: windows-latest
     permissions:
