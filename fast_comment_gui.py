@@ -89,6 +89,8 @@ class FastCommentGUI:
         self.video = tk.StringVar()
         self.chat = tk.StringVar()
         self.comment_offset = tk.StringVar(value="0")
+        self.obs_event_time = tk.StringVar()
+        self.twitch_event_time = tk.StringVar()
         self.style = tk.StringVar(value="nico")
         self.mode = tk.StringVar(value="burn")
         self.encoder = tk.StringVar(value="auto")
@@ -234,7 +236,16 @@ class FastCommentGUI:
                   foreground="#555").pack(anchor="w", pady=(6, 0))
         ttk.Label(sync, text="OBSの録画開始がTwitchより8秒遅い → -8（コメントを早める）。小数も可。",
                   foreground="#555").pack(anchor="w")
-        ttk.Label(sync, text="両方の動画で同じ場面の時刻を比較 → OBS側の時刻 − Twitch側の時刻を入力。",
+        ttk.Label(sync, text="同じ場面の時刻から自動計算（動画の音声や映像自体は解析しません）",
+                  foreground="#555").pack(anchor="w", pady=(6, 2))
+        times = ttk.Frame(sync)
+        times.pack(fill="x", pady=2)
+        ttk.Label(times, text="OBS側").pack(side="left")
+        ttk.Entry(times, textvariable=self.obs_event_time, width=12).pack(side="left", padx=(5, 12))
+        ttk.Label(times, text="Twitch側").pack(side="left")
+        ttk.Entry(times, textvariable=self.twitch_event_time, width=12).pack(side="left", padx=(5, 12))
+        ttk.Button(times, text="時刻差を計算", command=self.calculate_comment_offset).pack(side="left")
+        ttk.Label(sync, text="例：同じ場面がOBS 00:04:20 / Twitch 00:04:05 → +15秒。",
                   foreground="#555").pack(anchor="w", pady=(2, 0))
         opts = ttk.LabelFrame(frame, text="出力設定", padding=12)
         opts.pack(fill="x", pady=(12, 0))
@@ -295,6 +306,19 @@ class FastCommentGUI:
         ttk.Button(actions, text="出力フォルダを開く", command=self.open_output).pack(side="left", padx=12)
         ttk.Label(frame, text="「30秒プレビュー」は実際の動画ファイルを作るテストです。コメント設定タブのライブプレビューは変換なしで動きます。",
                   foreground="#555").pack(anchor="w")
+
+    def calculate_comment_offset(self):
+        """Populate the per-export offset from a shared OBS/Twitch scene."""
+        try:
+            value = core.offset_between_matching_events(
+                self.obs_event_time.get(), self.twitch_event_time.get())
+        except ValueError as exc:
+            messagebox.showerror("時刻差の計算", str(exc))
+            return
+        self.comment_offset.set(f"{value:+g}" if value else "0")
+        messagebox.showinfo("時刻差を設定しました",
+                            f"コメント時刻補正: {value:+g}秒\\n"
+                            "まず30秒テストで映像とコメントのタイミングを確認してください。")
 
     def _build_appearance_tab(self):
         pane = ttk.Panedwindow(self.tab_appearance, orient="horizontal")
