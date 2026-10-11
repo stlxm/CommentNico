@@ -66,8 +66,11 @@ class FastCommentGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("FastComment 2.0 — ライブプレビュー付き高速コメント合成")
-        root.geometry("1110x805")
-        root.minsize(900, 690)
+        # Keep the main action bar visible even on 1366x768 laptops or DPI-scaled monitors.
+        available_w = max(780, root.winfo_screenwidth() - 60)
+        available_h = max(540, root.winfo_screenheight() - 115)
+        root.geometry(f"{min(1140, available_w)}x{min(840, available_h)}")
+        root.minsize(min(780, available_w), min(540, available_h))
         try:
             output_prefs = load_output_preferences()
         except (ValueError, OSError, json.JSONDecodeError) as exc:
@@ -92,7 +95,9 @@ class FastCommentGUI:
         self.preview = tk.BooleanVar(value=True)
         self.time_mode = tk.StringVar(value="auto")
         self.start_time = tk.StringVar(value="00:00:00")
-        self.status = tk.StringVar(value="準備完了 — コメント設定タブでリアルタイムに見た目を調整できます")
+        self.status = tk.StringVar(value="準備完了 — 変換開始は上のボタンから")
+        self.progress_percent = tk.StringVar(value="未開始")
+        self.progress_detail = tk.StringVar(value="0% / 速度 -- / 残り時間 --")
         self.preview_note = tk.StringVar(value="サンプルコメントを再生中（エンコード不要）")
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.busy = False
@@ -139,9 +144,31 @@ class FastCommentGUI:
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="FastComment 2.0", font=("Segoe UI", 19, "bold")).pack(anchor="w")
         ttk.Label(outer, text="高速コメント合成 ＋ 再エンコード不要のライブプレビュー", foreground="#525252").pack(anchor="w", pady=(0, 9))
+        # Place critical controls ABOVE the notebook, independent of tab height.
+        # The previous bottom footer was pushed below the visible window on
+        # some high-DPI displays by the tall video/output form.
+        toolbar = ttk.LabelFrame(outer, text="変換の操作・進捗", padding=(10, 8))
+        toolbar.pack(fill="x", pady=(0, 8))
+        controls = ttk.Frame(toolbar)
+        controls.pack(fill="x")
+        self.start_button = ttk.Button(controls, text="▶ 変換開始（30秒テスト／全編）", command=self.start)
+        self.start_button.pack(side="right")
+        self.cancel_button = ttk.Button(controls, text="■ 中止", command=self.cancel, state="disabled")
+        self.cancel_button.pack(side="right", padx=(0, 10))
+        ttk.Label(controls, text="進捗", font=("Segoe UI", 11, "bold")).pack(side="left")
+        ttk.Label(controls, textvariable=self.progress_percent,
+                  font=("Segoe UI", 18, "bold"), width=9).pack(side="left", padx=(10, 0))
+        self.progressbar = ttk.Progressbar(toolbar, orient="horizontal",
+                                           mode="determinate", maximum=100)
+        self.progressbar.pack(fill="x", pady=(5, 3))
+        detail = ttk.Frame(toolbar)
+        detail.pack(fill="x")
+        ttk.Label(detail, textvariable=self.progress_detail).pack(side="left")
+        ttk.Label(detail, textvariable=self.status, foreground="#555").pack(side="right")
+
         self.tabs = ttk.Notebook(outer)
         self.tabs.pack(fill="both", expand=True)
-        self.tab_jobs = ttk.Frame(self.tabs, padding=12)
+        self.tab_jobs = ttk.Frame(self.tabs)
         self.tab_appearance = ttk.Frame(self.tabs, padding=12)
         self.tab_logs = ttk.Frame(self.tabs, padding=12)
         self.tabs.add(self.tab_jobs, text="  ① 動画・出力  ")
@@ -150,15 +177,6 @@ class FastCommentGUI:
         self._build_job_tab()
         self._build_appearance_tab()
         self._build_log_tab()
-        footer = ttk.Frame(outer)
-        footer.pack(fill="x", pady=(8, 0))
-        ttk.Label(footer, textvariable=self.status).pack(side="left", fill="x", expand=True)
-        self.start_button = ttk.Button(footer, text="▶  30秒テスト／変換を開始", command=self.start)
-        self.start_button.pack(side="right")
-        self.cancel_button = ttk.Button(footer, text="■ 中止", command=self.cancel, state="disabled")
-        self.cancel_button.pack(side="right", padx=(0, 8))
-        self.progressbar = ttk.Progressbar(footer, orient="horizontal", mode="determinate", maximum=100, length=180)
-        self.progressbar.pack(side="right", padx=(0, 12))
 
         for var in [self.font_size, self.speed_percent, self.row_gap, self.area_percent, self.collision, self.color_mode, self.style]:
             var.trace_add("write", lambda *_: self.settings_changed())
@@ -182,7 +200,19 @@ class FastCommentGUI:
             ttk.Label(row, text=hint, foreground="#666").pack(side="left", padx=(6, 0))
 
     def _build_job_tab(self):
-        frame = self.tab_jobs
+        # Scroll the lengthy settings form, not the essential controls above.
+        viewport = ttk.Frame(self.tab_jobs)
+        viewport.pack(fill="both", expand=True)
+        canvas = tk.Canvas(viewport, highlightthickness=0, borderwidth=0)
+        vertical = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        vertical.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=vertical.set)
+        frame = ttk.Frame(canvas, padding=12)
+        window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+        self._job_scroll_canvas = canvas
         files = ttk.LabelFrame(frame, text="動画・コメントの取得", padding=12)
         files.pack(fill="x")
         self._entry(files, "VOD ID / URL", self.vod, hint="例：2896810049")
