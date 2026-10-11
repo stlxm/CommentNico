@@ -14,3 +14,4 @@ work/
 *.json
 !sample_settings.json
 *.log
+tools/
