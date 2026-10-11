@@ -456,6 +456,55 @@ def render_exact_preview_frame(
     return count, dropped, frame
 
 
+
+def render_motion_preview(
+    video: Path, chat: Path, *, settings: CommentSettings, style: str,
+    start_seconds: float, duration_seconds: float = 8.0,
+    fps: int = 12, width: int = 640, height: int = 360,
+    work_dir: Path | None = None
+) -> tuple[list[bytes], int, int]:
+    """Create a short true FFmpeg/libass animation; no video re-encode output.
+
+    ASS is generated at source resolution and composited BEFORE scaling, just
+    like the full video. Each PNG is one actual output frame, not Tk fake text.
+    12 fps is a display-performance compromise and differs from video fps.
+    """
+    if not (1 <= fps <= 24 and 1 <= duration_seconds <= 15):
+        raise ValueError("動くプレビューの時間またはFPSが不正です")
+    ffmpeg = tool("ffmpeg")
+    w, h, duration = video_metadata(video, tool("ffprobe"))
+    start = parse_time(start_seconds)
+    if duration is not None and start >= duration:
+        raise ValueError("プレビュー開始位置が動画の終了より後です")
+    available = duration_seconds if duration is None else min(duration_seconds, duration-start)
+    if available <= 0:
+        raise ValueError("プレビュー対象の動画が短すぎます")
+    from app_paths import DATA_DIR
+    work_root = resolve_output_directory(work_dir) if work_dir is not None else DATA_DIR
+    work_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="fast_motion_", dir=work_root) as temp:
+        work = Path(temp)
+        ass = work / "comments.ass"
+        count, dropped = convert_chat_to_ass(
+            chat, ass, w, h, Options(style, "right", float(available), start, settings))
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error",
+                   "-ss", str(start), "-i", str(video),
+                   "-t", str(available), "-an",
+                   "-vf", f"setpts=PTS-STARTPTS,ass=comments.ass,fps={fps},scale={int(width)}:{int(height)}",
+                   "-frames:v", str(math.ceil(available * fps)),
+                   "-fps_mode", "vfr", "-y", "frame_%04d.png"]
+        result = subprocess.run(command, cwd=work, capture_output=True,
+                                text=True, errors="replace", timeout=180,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        if result.returncode != 0:
+            raise RuntimeError("動くプレビューの生成に失敗しました: " + (result.stderr or "")[-800:])
+        files = sorted(work.glob("frame_*.png"))
+        if not files:
+            raise RuntimeError("動くプレビュー用の画像が作成されませんでした")
+        frames = [path.read_bytes() for path in files]
+        return frames, fps, count
+
+
 def encoder_candidates(ffmpeg: str, prefer: str) -> list[tuple[str, list[str]]]:
     if prefer == "cpu":
         return [("CPU/libx264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])]
