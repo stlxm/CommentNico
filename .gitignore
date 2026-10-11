@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+build*/
+dist*/
+release/
+*.spec
+Originals/
+Output/
+work/
+*.mp4
+*.mkv
+*.json
+!sample_settings.json
+*.log

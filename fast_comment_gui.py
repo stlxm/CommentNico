@@ -1,0 +1,689 @@
+"""FastComment 2.0: Windows GUI with live, encoder-free comment preview.
+
+The canvas uses the same layout_comments() model as exported ASS subtitles.
+Tk previews approximate font rasterization; actual 30-second exports are authoritative.
+"""
+from __future__ import annotations
+
+import json
+import re
+import os
+import queue
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from dataclasses import asdict
+from pathlib import Path
+
+import tkinter as tk
+from tkinter import colorchooser, filedialog, messagebox, ttk
+
+import fast_comment as core
+from app_paths import APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, worker_command
+
+HERE = APP_DIR
+SETTINGS_PATH = SETTINGS_FILE
+SAMPLE = [
+    (0.2, "mabi_fan", "わー！ こんにちは！"),
+    (1.3, "game_love", "ナイス！すごい！！"),
+    (2.4, "neko_55", "今日も配信ありがとう 😊"),
+    (3.8, "mabi_fan", "コメントが右から流れるよ～"),
+    (5.0, "viewer_a", "888888888"),
+    (5.2, "viewer_b", "ここ好きｗｗｗ"),
+    (6.0, "game_love", "色や速さを変えてみよう"),
+    (7.2, "neko_55", "ファイト～！！"),
+    (8.6, "viewer_b", "ちょうどいいサイズかな？"),
+    (10.0, "mabi_fan", "ニコニコ風コメント"),
+]
+SAMPLE_ENTRIES = [{"content_offset_seconds": t, "commenter": {"name": name, "display_name": name},
+                   "message": {"body": msg, "user_color": ["#FFBC58", "#93E4FF", "#A8FF9C"][i % 3]}}
+                  for i, (t, name, msg) in enumerate(SAMPLE)]
+COLORS = {"twitch": "Twitchのユーザー色", "white": "全員白", "single": "全員同じ指定色",
+          "account": "アカウント別・自動色", "manual": "アカウント別・手動指定"}
+
+
+class FastCommentGUI:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        root.title("FastComment 2.0 — ライブプレビュー付き高速コメント合成")
+        root.geometry("1110x805")
+        root.minsize(900, 690)
+        self.vod = tk.StringVar()
+        self.video = tk.StringVar()
+        self.chat = tk.StringVar()
+        self.style = tk.StringVar(value="nico")
+        self.mode = tk.StringVar(value="burn")
+        self.encoder = tk.StringVar(value="auto")
+        self.normal = tk.BooleanVar(value=True)
+        self.preview = tk.BooleanVar(value=True)
+        self.time_mode = tk.StringVar(value="auto")
+        self.start_time = tk.StringVar(value="00:00:00")
+        self.status = tk.StringVar(value="準備完了 — コメント設定タブでリアルタイムに見た目を調整できます")
+        self.preview_note = tk.StringVar(value="サンプルコメントを再生中（エンコード不要）")
+        self.events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.busy = False
+        self._total_seconds = None
+        self._processed_seconds = 0.0
+        self._last_speed = ""
+        self.worker_process: subprocess.Popen | None = None
+        self._settings_job = None
+        self._preview_started = time.monotonic()
+        self._preview_paused_at: float | None = None
+        self._preview_image = None
+        self._preview_frame_path: Path | None = None
+        self._preview_real_entries = None
+        self._preview_start = 0.0
+        self._preview_span = 14.0
+        self._preview_events = []
+        try:
+            settings = core.load_comment_settings(SETTINGS_PATH)
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            messagebox.showwarning("設定の読み込み失敗", f"設定を初期値で起動します。\n{exc}")
+            settings = core.CommentSettings()
+        self.font_size = tk.IntVar(value=settings.font_size)
+        self.speed_percent = tk.IntVar(value=settings.speed_percent)
+        self.row_gap = tk.DoubleVar(value=settings.row_gap)
+        self.area_percent = tk.IntVar(value=settings.area_percent)
+        self.collision = tk.StringVar(value=settings.collision)
+        self.color_mode = tk.StringVar(value=settings.color_mode)
+        self.single_color = settings.single_color
+        self.account_colors = dict(settings.account_colors)
+        self.selected_account_color = "#FFB44C"
+
+        outer = ttk.Frame(root, padding=(14, 12))
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="FastComment 2.0", font=("Segoe UI", 19, "bold")).pack(anchor="w")
+        ttk.Label(outer, text="高速コメント合成 ＋ 再エンコード不要のライブプレビュー", foreground="#525252").pack(anchor="w", pady=(0, 9))
+        self.tabs = ttk.Notebook(outer)
+        self.tabs.pack(fill="both", expand=True)
+        self.tab_jobs = ttk.Frame(self.tabs, padding=12)
+        self.tab_appearance = ttk.Frame(self.tabs, padding=12)
+        self.tab_logs = ttk.Frame(self.tabs, padding=12)
+        self.tabs.add(self.tab_jobs, text="  ① 動画・出力  ")
+        self.tabs.add(self.tab_appearance, text="  ② コメント設定とプレビュー  ")
+        self.tabs.add(self.tab_logs, text="  ③ 処理ログ  ")
+        self._build_job_tab()
+        self._build_appearance_tab()
+        self._build_log_tab()
+        footer = ttk.Frame(outer)
+        footer.pack(fill="x", pady=(8, 0))
+        ttk.Label(footer, textvariable=self.status).pack(side="left", fill="x", expand=True)
+        self.start_button = ttk.Button(footer, text="▶  30秒テスト／変換を開始", command=self.start)
+        self.start_button.pack(side="right")
+        self.cancel_button = ttk.Button(footer, text="■ 中止", command=self.cancel, state="disabled")
+        self.cancel_button.pack(side="right", padx=(0, 8))
+        self.progressbar = ttk.Progressbar(footer, orient="horizontal", mode="determinate", maximum=100, length=180)
+        self.progressbar.pack(side="right", padx=(0, 12))
+
+        for var in [self.font_size, self.speed_percent, self.row_gap, self.area_percent, self.collision, self.color_mode, self.style]:
+            var.trace_add("write", lambda *_: self.settings_changed())
+        self._sync_options()
+        self._reset_preview_clock()
+        self._rebuild_preview()
+        root.after(40, self._animate_preview)
+        root.after(100, self.poll)
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    @staticmethod
+    def _entry(parent, label, var, *, browse=None, hint=None):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text=label, width=24).pack(side="left")
+        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+        if browse:
+            ttk.Button(row, text="参照…", command=browse).pack(side="left", padx=(8, 0))
+        if hint:
+            ttk.Label(row, text=hint, foreground="#666").pack(side="left", padx=(6, 0))
+
+    def _build_job_tab(self):
+        frame = self.tab_jobs
+        files = ttk.LabelFrame(frame, text="動画・コメントの取得", padding=12)
+        files.pack(fill="x")
+        self._entry(files, "VOD ID / URL", self.vod, hint="例：2896810049")
+        self._entry(files, "取得済みの動画", self.video,
+                    browse=lambda: self._browse(self.video, "動画を選択", [("動画", "*.mp4 *.mkv *.mov"), ("すべて", "*.*")]))
+        self._entry(files, "取得済みのチャットJSON", self.chat,
+                    browse=lambda: self._browse(self.chat, "コメントJSONを選択", [("JSON", "*.json"), ("すべて", "*.*")]))
+        ttk.Label(files, text="※ 未指定なら Originals の取得済みファイルを再利用。なければ TwitchDownloaderCLI でダウンロードします。",
+                  foreground="#555").pack(anchor="w", pady=(7, 0))
+        opts = ttk.LabelFrame(frame, text="出力設定", padding=12)
+        opts.pack(fill="x", pady=(12, 0))
+        r = ttk.Frame(opts)
+        r.pack(fill="x", pady=5)
+        ttk.Label(r, text="コメント表示", width=18).pack(side="left")
+        ttk.Radiobutton(r, text="ニコニコ風（流れる）", variable=self.style, value="nico").pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(r, text="Twitch風（固定）", variable=self.style, value="twitch").pack(side="left")
+        r = ttk.Frame(opts)
+        r.pack(fill="x", pady=5)
+        ttk.Label(r, text="ファイル形式", width=18).pack(side="left")
+        ttk.Radiobutton(r, text="MP4（焼き込み）", variable=self.mode, value="burn", command=self._sync_options).pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(r, text="MKV（字幕・再エンコードなし）", variable=self.mode, value="soft", command=self._sync_options).pack(side="left")
+        r = ttk.Frame(opts)
+        r.pack(fill="x", pady=5)
+        ttk.Label(r, text="エンコーダー", width=18).pack(side="left")
+        self.encoder_box = ttk.Combobox(r, textvariable=self.encoder, values=("auto", "cpu"), state="readonly", width=12)
+        self.encoder_box.pack(side="left")
+        ttk.Label(r, text=" auto = NVIDIA GPU 優先（失敗時CPU）", foreground="#555").pack(side="left", padx=(8, 0))
+        self.normal_control = ttk.Checkbutton(opts, text="音声ノーマライズを同時に実行（MP4のみ）", variable=self.normal)
+        self.normal_control.pack(anchor="w", pady=6)
+        test = ttk.LabelFrame(frame, text="テスト範囲", padding=12)
+        test.pack(fill="x", pady=(12, 0))
+        ttk.Checkbutton(test, text="30秒だけ動画を書き出して確認（推奨）", variable=self.preview,
+                        command=self._sync_options).pack(anchor="w")
+        r = ttk.Frame(test)
+        r.pack(fill="x", pady=6)
+        self.time_controls = []
+        for label, val in (("コメントの多い区間を自動選択", "auto"), ("時刻を指定", "manual"), ("動画の先頭", "first")):
+            b = ttk.Radiobutton(r, text=label, variable=self.time_mode, value=val, command=self._sync_options)
+            b.pack(side="left", padx=(0, 22))
+            self.time_controls.append(b)
+        r = ttk.Frame(test)
+        r.pack(anchor="w", pady=5)
+        ttk.Label(r, text="開始位置（時:分:秒）").pack(side="left")
+        self.start_entry = ttk.Entry(r, textvariable=self.start_time, width=16)
+        self.start_entry.pack(side="left", padx=10)
+        ttk.Label(r, text="例：01:25:00", foreground="#555").pack(side="left")
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=12)
+        ttk.Button(actions, text="🎨 コメント設定とライブプレビューへ", command=lambda: self.tabs.select(self.tab_appearance)).pack(side="left")
+        ttk.Button(actions, text="出力フォルダを開く", command=self.open_output).pack(side="left", padx=12)
+        ttk.Label(frame, text="「30秒プレビュー」は実際の動画ファイルを作るテストです。コメント設定タブのライブプレビューは変換なしで動きます。",
+                  foreground="#555").pack(anchor="w")
+
+    def _build_appearance_tab(self):
+        pane = ttk.Panedwindow(self.tab_appearance, orient="horizontal")
+        pane.pack(fill="both", expand=True)
+        left = ttk.Frame(pane, width=332)
+        right = ttk.Frame(pane)
+        pane.add(left, weight=0)
+        pane.add(right, weight=1)
+        ttk.Label(left, text="表示の調整", font=("Segoe UI", 13, "bold")).pack(anchor="w", pady=(0, 6))
+        self._scale_control(left, "文字サイズ（720p換算）", self.font_size, 12, 65, "px")
+        self._scale_control(left, "コメントの流れる速度", self.speed_percent, 40, 250, "%")
+        self._scale_control(left, "行間・上下の余白", self.row_gap, 1.0, 2.6, "倍", resolution=0.1)
+        self._scale_control(left, "コメントを使う画面の高さ", self.area_percent, 30, 95, "%")
+        ttk.Label(left, text="混雑時の表示", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(7, 2))
+        r = ttk.Frame(left)
+        r.pack(anchor="w")
+        ttk.Radiobutton(r, text="重なっても表示", variable=self.collision, value="overlap").pack(side="left")
+        ttk.Radiobutton(r, text="重なるコメントは間引く", variable=self.collision, value="skip").pack(side="left", padx=(5, 0))
+        ttk.Label(left, text="コメントの色", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(9, 3))
+        cb = ttk.Combobox(left, values=list(COLORS.values()), state="readonly", width=29)
+        cb.set(COLORS[self.color_mode.get()])
+        self.color_mode.trace_add("write", lambda *_: cb.set(COLORS[self.color_mode.get()]))
+        cb.pack(anchor="w", fill="x", padx=(0, 7))
+        cb.bind("<<ComboboxSelected>>", lambda e: self.color_mode.set(next(k for k, v in COLORS.items() if v == cb.get())))
+        self.color_pick_frame = ttk.Frame(left)
+        self.color_pick_frame.pack(fill="x", pady=7)
+        ttk.Button(self.color_pick_frame, text="🎨 全員の色を選択…", command=self.pick_single_color).pack(side="left")
+        self.single_swatch = tk.Label(self.color_pick_frame, width=3, height=1, bg=self.single_color, relief="sunken")
+        self.single_swatch.pack(side="left", padx=8)
+        ttk.Label(left, text="アカウント別の手動カラー（任意）", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(4, 2))
+        row = ttk.Frame(left)
+        row.pack(fill="x")
+        self.account_entry = ttk.Entry(row)
+        self.account_entry.pack(side="left", fill="x", expand=True)
+        self.account_entry.insert(0, "mabi_fan")
+        ttk.Button(row, text="色…", command=self.pick_account_color).pack(side="left", padx=(6, 0))
+        self.manual_swatch = tk.Label(row, width=3, bg=self.selected_account_color, relief="sunken")
+        self.manual_swatch.pack(side="left", padx=7)
+        r = ttk.Frame(left)
+        r.pack(anchor="w", pady=5)
+        ttk.Button(r, text="登録・更新", command=self.add_account_color).pack(side="left")
+        ttk.Button(r, text="選択した色を削除", command=self.delete_account_color).pack(side="left", padx=(7, 0))
+        self.account_list = tk.Listbox(left, height=4, exportselection=False)
+        self.account_list.pack(fill="x", padx=(0, 7))
+        self.account_list.bind("<<ListboxSelect>>", self.account_selected)
+        self._refresh_accounts()
+        ttk.Label(left, text="※ 色を適用するには『アカウント別・手動指定』を選択", foreground="#555").pack(anchor="w", pady=(2, 0))
+        btns = ttk.Frame(left)
+        btns.pack(fill="x", pady=8)
+        ttk.Button(btns, text="設定を保存", command=lambda: self.save_settings(show=True)).pack(side="left")
+        ttk.Button(btns, text="初期値に戻す", command=self.reset_settings).pack(side="left", padx=8)
+
+        ttk.Label(right, text="リアルタイム・コメントプレビュー", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=10, pady=(0, 6))
+        self.canvas = tk.Canvas(right, width=640, height=360, background="#111827", highlightthickness=1, highlightbackground="#444")
+        self.canvas.pack(fill="both", expand=False, padx=10)
+        self.canvas.bind("<Configure>", lambda e: self._redraw_background())
+        ttk.Label(right, textvariable=self.preview_note, foreground="#525252", wraplength=645).pack(anchor="w", padx=10, pady=(7, 0))
+        buttons = ttk.Frame(right)
+        buttons.pack(fill="x", padx=10, pady=8)
+        ttk.Button(buttons, text="▶ サンプルを再生", command=self.show_sample).pack(side="left")
+        ttk.Button(buttons, text="実コメントから再生", command=self.load_real_comments).pack(side="left", padx=7)
+        self.pause_button = ttk.Button(buttons, text="⏸ 一時停止", command=self.toggle_pause)
+        self.pause_button.pack(side="left", padx=7)
+        ttk.Button(right, text="選択済みMP4の1コマを背景に使う", command=self.load_video_background).pack(anchor="w", padx=10)
+        ttk.Label(right, text="※ この画面では字幕位置・色・速さを近似表示します。文字の縁取りなど最終的な見た目は30秒MP4で確認してください。",
+                  wraplength=640, foreground="#555").pack(anchor="w", padx=10, pady=10)
+        self._redraw_background()
+
+    def _scale_control(self, parent, label, variable, lower, upper, suffix, *, resolution=1):
+        line = ttk.Frame(parent)
+        line.pack(fill="x", pady=3)
+        display = ttk.Label(line, text="", width=7)
+        display.pack(side="right")
+        ttk.Label(line, text=label).pack(side="left")
+        scale = tk.Scale(parent, variable=variable, from_=lower, to=upper, orient="horizontal", resolution=resolution,
+                         showvalue=False, length=290, highlightthickness=0, bd=0)
+        scale.pack(fill="x", padx=(0, 8))
+        def update(*_):
+            value = variable.get()
+            display.configure(text=f"{value:g}{suffix}")
+        variable.trace_add("write", update)
+        update()
+
+    def _build_log_tab(self):
+        ttk.Label(self.tab_logs, text="変換の進捗ログ").pack(anchor="w")
+        box = ttk.Frame(self.tab_logs)
+        box.pack(fill="both", expand=True, pady=8)
+        self.log = tk.Text(box, wrap="word", font=("Consolas", 10), state="disabled")
+        self.log.pack(side="left", fill="both", expand=True)
+        bar = ttk.Scrollbar(box, command=self.log.yview)
+        bar.pack(side="right", fill="y")
+        self.log.configure(yscrollcommand=bar.set)
+
+    def _browse(self, variable, title, filetypes):
+        path = filedialog.askopenfilename(parent=self.root, title=title, filetypes=filetypes)
+        if path:
+            variable.set(path)
+
+    def _sync_options(self):
+        burn = self.mode.get() == "burn"
+        self.encoder_box.configure(state="readonly" if burn else "disabled")
+        self.normal_control.configure(state="normal" if burn else "disabled")
+        for button in self.time_controls:
+            button.configure(state="normal" if self.preview.get() else "disabled")
+        self.start_entry.configure(state="normal" if self.preview.get() and self.time_mode.get() == "manual" else "disabled")
+
+    def current_settings(self):
+        return core.CommentSettings(font_size=self.font_size.get(), speed_percent=self.speed_percent.get(),
+                                    row_gap=round(self.row_gap.get(), 2), area_percent=self.area_percent.get(),
+                                    collision=self.collision.get(), color_mode=self.color_mode.get(),
+                                    single_color=self.single_color, account_colors=dict(self.account_colors))
+
+    def settings_changed(self):
+        if self._settings_job is not None:
+            self.root.after_cancel(self._settings_job)
+        self._settings_job = self.root.after(125, self._apply_settings_change)
+
+    def _apply_settings_change(self):
+        self._settings_job = None
+        self._rebuild_preview()
+        self.save_settings()
+
+    def save_settings(self, *, show=False):
+        try:
+            core.save_comment_settings(SETTINGS_PATH, self.current_settings())
+            if show:
+                messagebox.showinfo("保存しました", "コメント設定を保存しました。次回起動時も引き継ぎます。")
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("保存失敗", str(exc))
+
+    def reset_settings(self):
+        if not messagebox.askyesno("初期値に戻す", "表示設定とアカウント別カラーを初期値に戻しますか？"):
+            return
+        cfg = core.CommentSettings()
+        self.font_size.set(cfg.font_size)
+        self.speed_percent.set(cfg.speed_percent)
+        self.row_gap.set(cfg.row_gap)
+        self.area_percent.set(cfg.area_percent)
+        self.collision.set(cfg.collision)
+        self.color_mode.set(cfg.color_mode)
+        self.single_color = cfg.single_color
+        self.single_swatch.configure(bg=self.single_color)
+        self.account_colors.clear()
+        self._refresh_accounts()
+        self.settings_changed()
+
+    def pick_single_color(self):
+        chosen = colorchooser.askcolor(color=self.single_color, parent=self.root, title="全員のコメント色")
+        if chosen[1]:
+            self.single_color = chosen[1].upper()
+            self.single_swatch.configure(bg=self.single_color)
+            self.color_mode.set("single")
+            self.settings_changed()
+
+    def pick_account_color(self):
+        chosen = colorchooser.askcolor(color=self.selected_account_color, parent=self.root, title="アカウントのコメント色")
+        if chosen[1]:
+            self.selected_account_color = chosen[1].upper()
+            self.manual_swatch.configure(bg=self.selected_account_color)
+
+    def add_account_color(self):
+        name = self.account_entry.get().strip().casefold()
+        if not name or len(name) > 64:
+            messagebox.showerror("入力エラー", "アカウント名は1～64文字で入力してください")
+            return
+        self.account_colors[name] = self.selected_account_color
+        self.color_mode.set("manual")
+        self._refresh_accounts()
+        self.settings_changed()
+
+    def delete_account_color(self):
+        picks = self.account_list.curselection()
+        if not picks:
+            return
+        name = self.account_list.get(picks[0]).split("  →  ", 1)[0]
+        self.account_colors.pop(name, None)
+        self._refresh_accounts()
+        self.settings_changed()
+
+    def account_selected(self, _):
+        picks = self.account_list.curselection()
+        if not picks:
+            return
+        name = self.account_list.get(picks[0]).split("  →  ", 1)[0]
+        self.account_entry.delete(0, "end")
+        self.account_entry.insert(0, name)
+        self.selected_account_color = self.account_colors.get(name, "#FFFFFF")
+        self.manual_swatch.configure(bg=self.selected_account_color)
+
+    def _refresh_accounts(self):
+        self.account_list.delete(0, "end")
+        for name, color in sorted(self.account_colors.items()):
+            self.account_list.insert("end", f"{name}  →  {color}")
+
+    def _reset_preview_clock(self):
+        self._preview_started = time.monotonic()
+        self._preview_paused_at = None
+        if hasattr(self, "pause_button"):
+            self.pause_button.configure(text="⏸ 一時停止")
+
+    def _rebuild_preview(self):
+        entries = SAMPLE_ENTRIES if self._preview_real_entries is None else self._preview_real_entries
+        start = 0.0 if self._preview_real_entries is None else self._preview_start
+        opts = core.Options(self.style.get(), "right", self._preview_span, start, self.current_settings())
+        self._preview_events, dropped = core.layout_comments(entries, 1280, 720, opts)
+        if dropped and self.collision.get() == "skip":
+            self.preview_note.set(f"表示コメント {len(self._preview_events)}件（混雑のため {dropped}件間引き）")
+
+    def show_sample(self):
+        self._preview_real_entries = None
+        self._preview_span = 14.0
+        self.preview_note.set("サンプルコメントを再生中（エンコード不要・変更を即時反映）")
+        self._reset_preview_clock()
+        self._rebuild_preview()
+
+    def load_real_comments(self):
+        path = Path(self.chat.get().strip()) if self.chat.get().strip() else None
+        if path is None:
+            try:
+                vod = core.normalize_id(self.vod.get())
+                path = CACHE_DIR / (vod + ".json")
+            except ValueError:
+                path = None
+        if path is None or not path.is_file():
+            messagebox.showinfo("コメントJSONが必要です", "先に動画・出力タブでVOD IDを入力するか、既存のチャットJSONを『参照…』から選択してください。\n取得済みなら Originals のキャッシュを利用します。")
+            return
+        self.preview_note.set("コメントJSONを読み込み中…")
+        chosen_mode = self.time_mode.get()
+        chosen_time = self.start_time.get()
+        def job():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+                comments = data.get("comments")
+                if not isinstance(comments, list):
+                    raise ValueError("commentsの形式が不正です")
+                if chosen_mode == "manual":
+                    start = core.parse_time(chosen_time)
+                elif chosen_mode == "first":
+                    start = 0.0
+                else:
+                    start, _ = core.suggest_preview_start(path, 30.0, None)
+                # Rebase immediately preceding valid comments not needed since text starts at its timestamp.
+                window = [e for e in comments if isinstance(e, dict) and start <= core._comment_sort_time(e) < start + 14.0]
+                self.events.put(("preview_loaded", (window, start, path.name)))
+            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                self.events.put(("preview_error", str(exc)))
+        threading.Thread(target=job, daemon=True).start()
+
+    def toggle_pause(self):
+        if self._preview_paused_at is None:
+            self._preview_paused_at = time.monotonic()
+            self.pause_button.configure(text="▶ 再開")
+        else:
+            self._preview_started += time.monotonic() - self._preview_paused_at
+            self._preview_paused_at = None
+            self.pause_button.configure(text="⏸ 一時停止")
+
+    def _redraw_background(self):
+        if not hasattr(self, "canvas"):
+            return
+        self.canvas.delete("background")
+        width = max(1, self.canvas.winfo_width())
+        height = max(1, self.canvas.winfo_height())
+        if self._preview_image:
+            self.canvas.create_image(0, 0, image=self._preview_image, anchor="nw", tags="background")
+        else:
+            self.canvas.create_rectangle(0, 0, width, height, fill="#142233", outline="", tags="background")
+            self.canvas.create_rectangle(0, height*.60, width, height, fill="#0d1827", outline="", tags="background")
+            self.canvas.create_text(width*.5, height*.5, text="FastComment | 配信動画プレビュー", fill="#546c8b",
+                                    font=("Segoe UI", 19, "bold"), tags="background")
+        self.canvas.tag_lower("background")
+
+    def load_video_background(self):
+        try:
+            path = Path(self.video.get().strip()) if self.video.get().strip() else None
+            if path is None:
+                vod = core.normalize_id(self.vod.get())
+                path = CACHE_DIR / (vod + ".mp4")
+            if not path.is_file() or not path.stat().st_size:
+                raise ValueError("動画を選ぶか、Originalsに元MP4を保存してください")
+            seconds = core.parse_time(self.start_time.get()) if self.time_mode.get() == "manual" else self._preview_start
+            ffmpeg = core.tool("ffmpeg")
+        except (ValueError, OSError, FileNotFoundError) as exc:
+            messagebox.showerror("背景の読み込み", str(exc))
+            return
+        self.preview_note.set("動画の1コマを読み込み中…")
+        def job():
+            try:
+                with tempfile.TemporaryDirectory(prefix="fast_frame_") as tmp:
+                    out = Path(tmp) / "frame.png"
+                    proc = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", str(seconds),
+                                           "-i", str(path), "-frames:v", "1", "-vf", "scale=640:360,format=rgb24",
+                                           "-f", "image2", "-vcodec", "png", "-y", str(out)],
+                                          capture_output=True, text=True, timeout=90)
+                    if proc.returncode != 0 or not out.is_file():
+                        raise RuntimeError(proc.stderr[-500:] or "フレームを抽出できませんでした")
+                    self.events.put(("background", out.read_bytes()))
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                self.events.put(("preview_error", str(exc)))
+        threading.Thread(target=job, daemon=True).start()
+
+    def _animate_preview(self):
+        try:
+            if self.canvas.winfo_exists():
+                now = self._preview_paused_at or time.monotonic()
+                t = (now - self._preview_started) % self._preview_span
+                cw = max(1, self.canvas.winfo_width())
+                ch = max(1, self.canvas.winfo_height())
+                self.canvas.delete("comments")
+                sx, sy = cw / 1280, ch / 720
+                for event in self._preview_events:
+                    if not event.at <= t < event.end:
+                        continue
+                    x = event.x_start + ((t-event.at) / (event.end-event.at)) * (event.x_end-event.x_start) if event.moving else event.x_start
+                    font_size = max(8, round(event.font_size * sy))
+                    self.canvas.create_text(x*sx + 1, event.y*sy + 1, text=event.text, font=("Meiryo", font_size, "bold"),
+                                            fill="#090909", anchor="ne" if event.align_right else "nw", tags="comments")
+                    self.canvas.create_text(x*sx, event.y*sy, text=event.text, font=("Meiryo", font_size, "bold"),
+                                            fill=event.color, anchor="ne" if event.align_right else "nw", tags="comments")
+        finally:
+            self.root.after(40, self._animate_preview)
+
+    def open_output(self):
+        target = OUTPUT_DIR
+        target.mkdir(exist_ok=True)
+        if os.name == "nt":
+            os.startfile(str(target))
+        else:
+            messagebox.showinfo("保存先", str(target))
+
+    def append(self, message):
+        self.log.configure(state="normal")
+        self.log.insert("end", str(message) + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def start(self):
+        if self.busy:
+            return
+        try:
+            vod_id = core.normalize_id(self.vod.get()) if self.vod.get().strip() else ""
+            if not vod_id and (not self.video.get().strip() or not self.chat.get().strip()):
+                raise ValueError("VOD IDを入力するか、動画とチャットJSONの両方を選択してください")
+            if self.video.get().strip() and not Path(self.video.get().strip()).is_file():
+                raise ValueError("選択した動画が見つかりません")
+            if self.chat.get().strip() and not Path(self.chat.get().strip()).is_file():
+                raise ValueError("選択したコメントJSONが見つかりません")
+            if self.preview.get() and self.time_mode.get() == "manual":
+                core.parse_time(self.start_time.get())
+            if self.preview.get() and self.mode.get() == "soft" and self.time_mode.get() != "first":
+                raise ValueError("途中からの30秒テストはMP4焼き込みを選択してください（MKVの無劣化コピーでは時刻がずれます）")
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("入力の確認", str(exc))
+            return
+        self.save_settings()
+        try:
+            args = worker_command() + ["--style", self.style.get(), "--mode", self.mode.get(), "--settings", str(SETTINGS_PATH)]
+        except OSError as exc:
+            messagebox.showerror("起動エラー", str(exc))
+            return
+        if vod_id:
+            args += ["--vod", vod_id]
+        if self.video.get().strip():
+            args += ["--video", self.video.get().strip()]
+        if self.chat.get().strip():
+            args += ["--chat", self.chat.get().strip()]
+        if self.mode.get() == "burn":
+            args += ["--encoder", self.encoder.get()]
+            if self.normal.get():
+                args.append("--normalize")
+        if self.preview.get():
+            args += ["--preview-seconds", "30"]
+            if self.time_mode.get() == "auto":
+                args += ["--auto-preview"]
+            elif self.time_mode.get() == "manual":
+                args += ["--preview-start", self.start_time.get()]
+        self.busy = True
+        self._total_seconds = 30.0 if self.preview.get() else None
+        self._processed_seconds = 0.0
+        self._last_speed = ""
+        self.progressbar.configure(value=0)
+        self.start_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
+        self.tabs.select(self.tab_logs)
+        self.status.set("処理中 — ログタブで進捗確認できます（中止可能）")
+        self.append("=" * 40)
+        self.append("開始しました。コメント設定は変換開始時の内容で保存されています。")
+        def job():
+            try:
+                kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+                          "text": True, "errors": "replace", "bufsize": 1}
+                if os.name == "nt":
+                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                self.worker_process = subprocess.Popen(args, **kwargs)
+                assert self.worker_process.stdout is not None
+                for line in self.worker_process.stdout:
+                    self.events.put(("log", line.rstrip("\r\n")))
+                self.events.put(("done", self.worker_process.wait()))
+            except (ValueError, OSError) as exc:
+                self.events.put(("error", str(exc)))
+            finally:
+                self.worker_process = None
+        threading.Thread(target=job, daemon=True).start()
+
+    def cancel(self):
+        if not self.busy:
+            return
+        if not messagebox.askyesno("処理を中止", "実行中の処理を中止しますか？元動画やJSONは削除されません。"):
+            return
+        self.status.set("中止を要求しています…")
+        self.cancel_button.configure(state="disabled")
+        proc = self.worker_process
+        if proc is not None and proc.poll() is None:
+            # Windows taskkill /T terminates FFmpeg / TwitchDownloader child processes too.
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                proc.terminate()
+
+    def _read_progress(self, line: str):
+        """Parse -progress pipe:1 output without treating it as completion."""
+        if line.startswith("動画:") and self._total_seconds is None:
+            match = re.search(r"時間:\s*([0-9.]+)秒", line)
+            if match:
+                self._total_seconds = float(match.group(1))
+        if line.startswith("out_time="):
+            try:
+                self._processed_seconds = core.parse_time(line.partition("=")[2])
+            except ValueError:
+                pass
+        if line.startswith("speed="):
+            self._last_speed = line.partition("=")[2].strip()
+        if line == "progress=continue" and self._total_seconds:
+            percent = min(99.0, 100 * self._processed_seconds / self._total_seconds)
+            self.progressbar.configure(value=percent)
+            self.status.set(f"エンコード中 {percent:.0f}% — 速度 {self._last_speed or '計測中'}")
+
+    def poll(self):
+        while True:
+            try:
+                event, payload = self.events.get_nowait()
+            except queue.Empty:
+                break
+            if event == "log":
+                self._read_progress(payload)
+                if not (payload.startswith(("frame=", "fps=", "out_time=", "speed=", "bitrate=", "total_size=", "out_time_ms=", "out_time_us=", "dup_frames=", "drop_frames=", "stream_", "progress="))):
+                    self.append(payload)
+            elif event == "preview_loaded":
+                entries, start, filename = payload
+                self._preview_real_entries = entries
+                self._preview_start = start
+                self._preview_span = 14.0
+                self._reset_preview_clock()
+                self._rebuild_preview()
+                self.preview_note.set(f"実コメント: {filename} / {core.pretty_time(start)} から14秒・{len(entries)}件")
+            elif event == "background":
+                import base64
+                # PhotoImage accepts binary PPM data when base64-encoded as a Tk string.
+                self._preview_image = tk.PhotoImage(data=base64.b64encode(payload).decode("ascii"), format="png")
+                self._redraw_background()
+                self.preview_note.set("配信動画の1コマを背景にしました（字幕設定はリアルタイム反映）")
+            elif event == "preview_error":
+                self.preview_note.set(f"プレビューの読込失敗: {payload}")
+            else:
+                self.busy = False
+                self.start_button.configure(state="normal")
+                self.cancel_button.configure(state="disabled")
+                success = event == "done" and payload == 0
+                self.progressbar.configure(value=100 if success else 0)
+                self.status.set("変換完了。出力フォルダを確認してください" if success else "失敗しました。ログを確認してください")
+                self.append("正常終了" if success else f"処理失敗：{payload}")
+        self.root.after(100, self.poll)
+
+    def on_close(self):
+        if self.busy:
+            messagebox.showinfo("処理中", "変換中です。中止ボタンから停止するか、完了後に閉じてください。")
+            return
+        if self._settings_job is not None:
+            self.root.after_cancel(self._settings_job)
+        self.save_settings()
+        self.root.destroy()
+
+
+def main(on_ready=None):
+    """Start GUI; optionally signal readiness when Tk enters its event loop."""
+    root = tk.Tk()
+    ttk.Style(root)
+    FastCommentGUI(root)
+    if on_ready is not None:
+        root.after_idle(on_ready)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
