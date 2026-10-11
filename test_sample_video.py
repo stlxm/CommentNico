@@ -46,6 +46,16 @@ class AccurateMovingSampleTests(unittest.TestCase):
                          "setpts=PTS-STARTPTS,ass=comments.ass,scale=640:360,format=rgb24")
         self.assertEqual(captured["command"][captured["command"].index("-frames:v")+1], "96")
 
+    def test_configured_manual_colors_are_visible_in_sample(self):
+        cfg = core.CommentSettings(
+            color_mode="manual",
+            account_colors={"favorite_viewer": "#123ABC"})
+        entries = gui.sample_entries_for_settings(cfg)
+        self.assertEqual(entries[0]["commenter"]["name"], "favorite_viewer")
+        self.assertEqual(core.resolve_comment_color(entries[0], cfg), "#123ABC")
+        self.assertEqual(len(entries), len(gui.SAMPLE_ENTRIES))
+        self.assertEqual(gui.SAMPLE_ENTRIES[0]["commenter"]["name"], "mabi_fan")
+
     def test_invalid_video_preview_rate_rejected(self):
         with self.assertRaises(ValueError):
             core.render_sample_video_preview([], core.CommentSettings(), "nico", fps=100)
