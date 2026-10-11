@@ -1,0 +1,44 @@
+name: Windows portable beta
+on:
+  push:
+    branches: [feature/fastcomment-v2-portable]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Unit tests
+        run: python -m unittest discover -s . -p "test_*.py" -v
+      - name: Install PyInstaller
+        run: python -m pip install --disable-pip-version-check pyinstaller==6.16.0
+      - name: Build graphical EXE
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name FastComment --distpath dist/portable FastComment_GUI.pyw
+      - name: Build worker EXE
+        run: python -m PyInstaller --noconfirm --clean --onefile --console --name FastCommentWorker --distpath dist/portable FastCommentWorker.py
+      - name: Bundle beta artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/portable/tools | Out-Null
+          Copy-Item README.md,THIRD_PARTY_NOTICES.md dist/portable/
+          @'
+          Beta build: copy TwitchDownloaderCLI.exe, ffmpeg.exe and ffprobe.exe
+          into this tools directory before starting FastComment.exe.
+          This keeps the old install untouched; after copying the tools
+          this folder operates independently from it.
+          '@ | Set-Content dist/portable/tools/SETUP_FIRST.txt
+      - name: Publish Windows test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: FastComment-Windows-beta
+          path: dist/portable/
+          retention-days: 7
