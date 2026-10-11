@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import errno
 import colorsys
+from collections import deque
 import hashlib
 import math
 import json
@@ -33,9 +34,67 @@ def tool(name: str) -> str:
     return executable(name)
 
 
+def _execute_ffmpeg_with_compact_progress(
+    args: list[str], *, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Stream FFmpeg output without flooding consoles with progress key/value lines.
+
+    Emit one structured update approximately every 5 s for the GUI while
+    preserving warnings and diagnostics on failure. Never buffer the full
+    stdout of an hours-long encode in memory.
+    """
+    print("[INFO] FFmpegで動画を変換しています…", flush=True)
+    recent = deque(maxlen=90)
+    out_time = "0"
+    speed = "N/A"
+    last_report = -1e12
+    kwargs = {"cwd": cwd, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+              "text": True, "errors": "replace", "bufsize": 1}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    with subprocess.Popen([str(x) for x in args], **kwargs) as proc:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            key, sep, value = line.partition("=")
+            if sep and key in {
+                "frame", "fps", "stream_0_0_q", "bitrate", "total_size",
+                "out_time_us", "out_time_ms", "out_time", "dup_frames",
+                "drop_frames", "speed", "progress"
+            }:
+                if key == "out_time":
+                    out_time = value
+                elif key == "speed":
+                    speed = value
+                elif key == "progress":
+                    now = time.monotonic()
+                    if value == "end" or now - last_report >= 5.0:
+                        # All progress data in one line; the GUI owns percent/ETA.
+                        print(f"FC_PROGRESS|{out_time}|{speed}", flush=True)
+                        if value == "end":
+                            print("FC_FINALIZING", flush=True)
+                        last_report = now
+                continue
+            recent.append(line)
+            if re.search(r"(error|warning|failed|invalid|unable|cannot)", line, re.IGNORECASE):
+                print("[FFmpeg] " + line, flush=True)
+        returncode = proc.wait()
+    if returncode:
+        print("[ERROR] FFmpegが失敗しました。直近の診断ログ:", flush=True)
+        for item in list(recent)[-18:]:
+            print("  " + item, flush=True)
+        raise subprocess.CalledProcessError(returncode, [str(x) for x in args])
+    return subprocess.CompletedProcess(args, 0)
+
+
 def execute(args: list[str], *, cwd: Path | None = None, quiet: bool = False) -> subprocess.CompletedProcess[str]:
+    if not quiet and "-progress" in args and "pipe:1" in args:
+        return _execute_ffmpeg_with_compact_progress(args, cwd=cwd)
     if not quiet:
-        print("実行:", " ".join(str(x) for x in args), flush=True)
+        command_name = Path(str(args[0])).name
+        print(f"[INFO] 実行開始: {command_name}", flush=True)
     return subprocess.run([str(x) for x in args], cwd=cwd, check=True,
                           capture_output=quiet, text=quiet, errors="replace" if quiet else None)
 

@@ -23,16 +23,24 @@ class ProgressAndCancellationTests(unittest.TestCase):
         gui = object.__new__(FastCommentGUI)
         gui.status = MagicMock()
         gui.progressbar = MagicMock()
+        gui.progress_percent = MagicMock()
+        gui.progress_detail = MagicMock()
         gui._total_seconds = 30.0
         gui._processed_seconds = 0.0
         gui._last_speed = ""
         gui._read_progress("progress=continue")
-        self.assertIn("計測中", gui.status.set.call_args.args[0])
+        self.assertIn("計測中", gui.progress_detail.set.call_args.args[0])
         gui._read_progress("out_time=00:00:10.000")
         gui._read_progress("speed=5.0x")
         gui._read_progress("progress=continue")
-        self.assertIn("残り約 00:04", gui.status.set.call_args.args[0])
+        self.assertIn("残り約 00:04", gui.progress_detail.set.call_args.args[0])
+        self.assertEqual(gui.progress_percent.set.call_args.args[0], "33.3%")
         self.assertEqual(gui.progressbar.configure.call_args.kwargs["value"], 100 / 3)
+        gui._read_progress("FC_PROGRESS|00:00:20.000|10.0x")
+        self.assertEqual(gui.progress_percent.set.call_args.args[0], "66.7%")
+        self.assertIn("残り約 00:01", gui.progress_detail.set.call_args.args[0])
+        gui._read_progress("progress=end")
+        self.assertEqual(gui.progress_percent.set.call_args.args[0], "保存中")
 
     def test_cancel_before_process_start_does_not_spawn_it(self):
         gui = object.__new__(FastCommentGUI)
