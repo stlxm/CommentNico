@@ -317,7 +317,7 @@ class FastCommentGUI:
             return
         self.comment_offset.set(f"{value:+g}" if value else "0")
         messagebox.showinfo("時刻差を設定しました",
-                            f"コメント時刻補正: {value:+g}秒\\n"
+                            f"コメント時刻補正: {value:+g}秒\n"
                             "まず30秒テストで映像とコメントのタイミングを確認してください。")
 
     def _build_appearance_tab(self):
