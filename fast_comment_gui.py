@@ -88,6 +88,9 @@ class FastCommentGUI:
         self.vod = tk.StringVar()
         self.video = tk.StringVar()
         self.chat = tk.StringVar()
+        self.comment_offset = tk.StringVar(value="0")
+        self.obs_event_time = tk.StringVar()
+        self.twitch_event_time = tk.StringVar()
         self.style = tk.StringVar(value="nico")
         self.mode = tk.StringVar(value="burn")
         self.encoder = tk.StringVar(value="auto")
@@ -222,6 +225,28 @@ class FastCommentGUI:
                     browse=lambda: self._browse(self.chat, "コメントJSONを選択", [("JSON", "*.json"), ("すべて", "*.*")]))
         ttk.Label(files, text="※ 未指定なら Originals の取得済みファイルを再利用。なければ TwitchDownloaderCLI でダウンロードします。",
                   foreground="#555").pack(anchor="w", pady=(7, 0))
+        sync = ttk.LabelFrame(frame, text="OBS録画とTwitchコメントの時刻合わせ", padding=12)
+        sync.pack(fill="x", pady=(12, 0))
+        offset_row = ttk.Frame(sync)
+        offset_row.pack(fill="x")
+        ttk.Label(offset_row, text="コメント時刻補正（秒）").pack(side="left")
+        ttk.Entry(offset_row, textvariable=self.comment_offset, width=13).pack(side="left", padx=(12, 8))
+        ttk.Button(offset_row, text="0に戻す", command=lambda: self.comment_offset.set("0")).pack(side="left")
+        ttk.Label(sync, text="OBSの録画開始がTwitchより12秒早い → +12（コメントを遅らせる）",
+                  foreground="#555").pack(anchor="w", pady=(6, 0))
+        ttk.Label(sync, text="OBSの録画開始がTwitchより8秒遅い → -8（コメントを早める）。小数も可。",
+                  foreground="#555").pack(anchor="w")
+        ttk.Label(sync, text="同じ場面の時刻から自動計算（動画の音声や映像自体は解析しません）",
+                  foreground="#555").pack(anchor="w", pady=(6, 2))
+        times = ttk.Frame(sync)
+        times.pack(fill="x", pady=2)
+        ttk.Label(times, text="OBS側").pack(side="left")
+        ttk.Entry(times, textvariable=self.obs_event_time, width=12).pack(side="left", padx=(5, 12))
+        ttk.Label(times, text="Twitch側").pack(side="left")
+        ttk.Entry(times, textvariable=self.twitch_event_time, width=12).pack(side="left", padx=(5, 12))
+        ttk.Button(times, text="時刻差を計算", command=self.calculate_comment_offset).pack(side="left")
+        ttk.Label(sync, text="例：同じ場面がOBS 00:04:20 / Twitch 00:04:05 → +15秒。",
+                  foreground="#555").pack(anchor="w", pady=(2, 0))
         opts = ttk.LabelFrame(frame, text="出力設定", padding=12)
         opts.pack(fill="x", pady=(12, 0))
         r = ttk.Frame(opts)
@@ -281,6 +306,19 @@ class FastCommentGUI:
         ttk.Button(actions, text="出力フォルダを開く", command=self.open_output).pack(side="left", padx=12)
         ttk.Label(frame, text="「30秒プレビュー」は実際の動画ファイルを作るテストです。コメント設定タブのライブプレビューは変換なしで動きます。",
                   foreground="#555").pack(anchor="w")
+
+    def calculate_comment_offset(self):
+        """Populate the per-export offset from a shared OBS/Twitch scene."""
+        try:
+            value = core.offset_between_matching_events(
+                self.obs_event_time.get(), self.twitch_event_time.get())
+        except ValueError as exc:
+            messagebox.showerror("時刻差の計算", str(exc))
+            return
+        self.comment_offset.set(f"{value:+g}" if value else "0")
+        messagebox.showinfo("時刻差を設定しました",
+                            f"コメント時刻補正: {value:+g}秒\n"
+                            "まず30秒テストで映像とコメントのタイミングを確認してください。")
 
     def _build_appearance_tab(self):
         pane = ttk.Panedwindow(self.tab_appearance, orient="horizontal")
@@ -549,7 +587,11 @@ class FastCommentGUI:
     def _rebuild_preview(self):
         entries = SAMPLE_ENTRIES if self._preview_real_entries is None else self._preview_real_entries
         start = 0.0 if self._preview_real_entries is None else self._preview_start
-        opts = core.Options(self.style.get(), "right", self._preview_span, start, self.current_settings())
+        try:
+            offset = core.parse_comment_offset(self.comment_offset.get()) if self._preview_real_entries is not None else 0.0
+        except ValueError:
+            offset = 0.0  # Input validation happens before actual preview/export.
+        opts = core.Options(self.style.get(), "right", self._preview_span, start, self.current_settings(), offset)
         self._preview_events, dropped = core.layout_comments(entries, 1280, 720, opts)
         if dropped and self.collision.get() == "skip":
             self.preview_note.set(f"表示コメント {len(self._preview_events)}件（混雑のため {dropped}件間引き）")
@@ -577,6 +619,11 @@ class FastCommentGUI:
         self.preview_note.set("コメントJSONを読み込み中…")
         chosen_mode = self.time_mode.get()
         chosen_time = self.start_time.get()
+        try:
+            offset = core.parse_comment_offset(self.comment_offset.get())
+        except ValueError as exc:
+            messagebox.showerror("時刻補正の入力", str(exc))
+            return
         def job():
             try:
                 data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -588,9 +635,9 @@ class FastCommentGUI:
                 elif chosen_mode == "first":
                     start = 0.0
                 else:
-                    start, _ = core.suggest_preview_start(path, 30.0, None)
-                # Rebase immediately preceding valid comments not needed since text starts at its timestamp.
-                window = [e for e in comments if isinstance(e, dict) and start <= core._comment_sort_time(e) < start + 14.0]
+                    start, _ = core.suggest_preview_start(path, 30.0, None, offset)
+                window = [e for e in comments if isinstance(e, dict)
+                          and start <= core._comment_sort_time(e) + offset < start + 14.0]
                 self.events.put(("preview_loaded", (window, start, path.name)))
             except (ValueError, OSError, json.JSONDecodeError) as exc:
                 self.events.put(("preview_error", str(exc)))
@@ -648,6 +695,7 @@ class FastCommentGUI:
             mode = self.time_mode.get()
             appearance = self.current_settings()
             style = self.style.get()
+            offset = core.parse_comment_offset(self.comment_offset.get())
         except (ValueError, OSError) as exc:
             messagebox.showinfo("実描画プレビュー", str(exc))
             return
@@ -660,12 +708,12 @@ class FastCommentGUI:
                     start = 0.0
                 else:
                     _, _, duration = core.video_metadata(video, core.tool("ffprobe"))
-                    start, _ = core.suggest_preview_start(chat, 30.0, duration)
+                    start, _ = core.suggest_preview_start(chat, 30.0, duration, offset)
                 with tempfile.TemporaryDirectory(prefix="fast_exact_frame_") as tmp:
                     frame_path = Path(tmp) / "frame.png"
                     count, dropped, frame_seconds = core.render_exact_preview_frame(
                         video, chat, frame_path, settings=appearance, style=style,
-                        start_seconds=start)
+                        start_seconds=start, comment_offset_seconds=offset)
                     self.events.put(("exact_preview_loaded",
                                      (frame_path.read_bytes(), start + frame_seconds, count, dropped)))
             except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -796,6 +844,7 @@ class FastCommentGUI:
                 raise ValueError("選択した動画が見つかりません")
             if self.chat.get().strip() and not Path(self.chat.get().strip()).is_file():
                 raise ValueError("選択したコメントJSONが見つかりません")
+            offset = core.parse_comment_offset(self.comment_offset.get())
             if self.preview.get() and self.time_mode.get() == "manual":
                 core.parse_time(self.start_time.get())
             if self.preview.get() and self.mode.get() == "soft" and self.time_mode.get() != "first":
@@ -815,6 +864,7 @@ class FastCommentGUI:
         args += ["--output-dir", str(output_dir)]
         args += ["--cache-dir", str(resolve_output_directory(self.cache_directory.get()))]
         args += ["--work-dir", str(work_directory_for_output(output_dir))]
+        args += ["--comment-offset", str(offset)]
         if vod_id:
             args += ["--vod", vod_id]
         if self.video.get().strip():
@@ -846,6 +896,8 @@ class FastCommentGUI:
         self.status.set("処理中 — ログタブで進捗確認できます（中止可能）")
         self.append("=" * 40)
         self.append("開始しました。コメント設定は変換開始時の内容で保存されています。")
+        if offset:
+            self.append(f"OBS録画用の時刻補正: {offset:+g}秒（+で遅らせる、-で早める）")
         threading.Thread(target=self._run_worker, args=(args,), daemon=True).start()
 
     @staticmethod

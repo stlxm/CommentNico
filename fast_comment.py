@@ -292,6 +292,8 @@ class Options:
     sample_seconds: float | None = None
     start_seconds: float = 0.0
     settings: CommentSettings = field(default_factory=CommentSettings)
+    # Positive: OBS recording started earlier than Twitch VOD; delay chat.
+    comment_offset_seconds: float = 0.0
 
 
 @dataclass
@@ -332,12 +334,40 @@ def parse_time(value: str | float | int) -> float:
     return seconds
 
 
+def parse_comment_offset(value: str | float | int) -> float:
+    """Signed difference: OBS timestamp of an event minus Twitch VOD timestamp.
+
+    Examples: '+12.5', '-00:00:08', '0'. Positive offsets delay chat
+    on the OBS recording; negative offsets advance it.
+    """
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+    else:
+        raw = str(value).strip()
+        if not raw:
+            raise ValueError("コメント時刻の補正を入力してください（例: +12.5、-8、0）")
+        sign = -1 if raw.startswith("-") else 1
+        magnitude = raw[1:] if raw[:1] in "+-" else raw
+        seconds = sign * parse_time(magnitude)
+    if not math.isfinite(seconds) or abs(seconds) > 86400:
+        raise ValueError("コメント時刻の補正は±24時間以内で指定してください")
+    return seconds
+
+
+def offset_between_matching_events(obs_timestamp: str, twitch_timestamp: str) -> float:
+    """Find signed chat offset when the same event is visible in both videos."""
+    if not str(obs_timestamp).strip() or not str(twitch_timestamp).strip():
+        raise ValueError("OBS側とTwitch側の時刻を両方入力してください")
+    return parse_comment_offset(parse_time(obs_timestamp) - parse_time(twitch_timestamp))
+
+
 def pretty_time(seconds: float) -> str:
     t = int(seconds)
     return f"{t // 3600:02}:{t // 60 % 60:02}:{t % 60:02}"
 
 
-def suggest_preview_start(chat: Path, seconds: float, duration: float | None) -> tuple[float, int]:
+def suggest_preview_start(chat: Path, seconds: float, duration: float | None,
+                          offset_seconds: float = 0.0) -> tuple[float, int]:
     """Find a dense comment window in O(n log n), biased 1 s before first comment."""
     data = json.loads(chat.read_text(encoding="utf-8-sig"))
     entries = data.get("comments")
@@ -354,8 +384,9 @@ def suggest_preview_start(chat: Path, seconds: float, duration: float | None) ->
             t = float(entry.get("content_offset_seconds", -1))
         except (TypeError, ValueError):
             continue
-        if 0 <= t < float("inf") and (duration is None or t < duration):
-            times.append(t)
+        shifted = t + offset_seconds
+        if math.isfinite(t) and t >= 0 and math.isfinite(shifted) and shifted >= 0 and (duration is None or shifted < duration):
+            times.append(shifted)
     if not times:
         return 0.0, 0
     times.sort()
@@ -390,7 +421,7 @@ def layout_comments(entries: list, width: int, height: int, options: Options) ->
     line_start_x = width + 24
     for entry in sorted((e for e in entries if isinstance(e, dict)),
                         key=lambda e: _comment_sort_time(e)):
-        at = _comment_sort_time(entry)
+        at = _comment_sort_time(entry) + options.comment_offset_seconds
         if not math.isfinite(at) or at < options.start_seconds or (options.sample_seconds is not None and at >= options.start_seconds + options.sample_seconds):
             continue
         msg = entry.get("message") or {}
@@ -477,7 +508,8 @@ def convert_chat_to_ass(chat: Path, out: Path, width: int, height: int,
 def render_exact_preview_frame(
     video: Path, chat: Path, out: Path, *, settings: CommentSettings, style: str,
     start_seconds: float, frame_seconds: float = 5.0,
-    width: int = 640, height: int = 360
+    width: int = 640, height: int = 360,
+    comment_offset_seconds: float = 0.0
 ) -> tuple[int, int, float]:
     """Render one real source frame with the same libass filter used for export."""
     ffmpeg = tool("ffmpeg")
@@ -496,7 +528,7 @@ def render_exact_preview_frame(
         ass = work / "comments.ass"
         count, dropped = convert_chat_to_ass(
             chat, ass, video_width, video_height,
-            Options(style, "right", span, start, settings)
+            Options(style, "right", span, start, settings, comment_offset_seconds)
         )
         select = format(frame, ".3f").rstrip("0").rstrip(".") or "0"
         video_filter = (
@@ -752,7 +784,7 @@ def process(vod_id: str, *, video: Path | None, chat: Path | None, style: str,
             preview_seconds: float | None, preview_start: float = 0.0,
             auto_preview: bool = False, settings: CommentSettings | None = None,
             output_dir: Path | None = None, cache_dir: Path | None = None,
-            work_dir: Path | None = None) -> Path:
+            work_dir: Path | None = None, comment_offset_seconds: float = 0.0) -> Path:
     if not vod_id and (video is None or chat is None):
         raise ValueError("動画またはJSONが不足している場合はVOD IDを入力してください")
     if not vod_id:
@@ -771,12 +803,15 @@ def process(vod_id: str, *, video: Path | None, chat: Path | None, style: str,
         video = download(cli or tool("TwitchDownloaderCLI"), "videodownload", vod_id, cache_root / f"{vod_id}.mp4", ffprobe)
     if chat is None:
         chat = download(cli or tool("TwitchDownloaderCLI"), "chatdownload", vod_id, cache_root / f"{vod_id}.json")
+    comment_offset_seconds = parse_comment_offset(comment_offset_seconds)
     w, h, duration = video_metadata(video, ffprobe)
+    if comment_offset_seconds:
+        print(f"[INFO] コメント時刻の補正: {comment_offset_seconds:+g}秒（+は遅らせる、-は早める）", flush=True)
     print(f"動画: {w}x{h}  時間: {duration or '不明'}秒  サイズ: {video.stat().st_size / 1024 ** 2:.1f}MB")
     if auto_preview:
         if preview_seconds is None:
             raise ValueError("コメントの多い区間の自動選択にはプレビュー時間が必要です")
-        preview_start, expected_count = suggest_preview_start(chat, preview_seconds, duration)
+        preview_start, expected_count = suggest_preview_start(chat, preview_seconds, duration, comment_offset_seconds)
         print(f"[OK] コメントの多い区間を自動選択: {pretty_time(preview_start)} 付近（{expected_count}件）")
     if preview_seconds is not None:
         if mode == "soft" and preview_start > 0:
@@ -801,7 +836,7 @@ def process(vod_id: str, *, video: Path | None, chat: Path | None, style: str,
     with tempfile.TemporaryDirectory(prefix="fast_comments_", dir=work_root) as temp:
         work = Path(temp)
         ass = work / "comments.ass"
-        count, overlaps = convert_chat_to_ass(chat, ass, w, h, Options(style, position, preview_seconds, preview_start, settings or CommentSettings()))
+        count, overlaps = convert_chat_to_ass(chat, ass, w, h, Options(style, position, preview_seconds, preview_start, settings or CommentSettings(), comment_offset_seconds))
         kind = "間引き" if (settings and settings.collision == "skip") else "重なりの可能性"
         print(f"字幕: {count}件（混雑時の{kind}: {overlaps}件）")
         dest = output_path(chat, vod_id, style, mode, preview_seconds, preview_start, output_dir=output_dir)
@@ -900,7 +935,7 @@ def interactive() -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="TwitchコメントをASS字幕化し、高速に合成")
     parser.add_argument("--vod", help="Twitchアーカイブ動画ID/URL")
-    parser.add_argument("--video", type=Path, help="取得済みMP4（再ダウンロードを省略）")
+    parser.add_argument("--video", type=Path, help="取得済み動画（OBSのMKV/MP4等。再ダウンロードを省略）")
     parser.add_argument("--chat", type=Path, help="取得済みチャットJSON（再ダウンロードを省略）")
     parser.add_argument("--style", choices=["nico", "twitch"], default="nico")
     parser.add_argument("--position", choices=["left", "right"], default="right")
@@ -908,6 +943,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--encoder", choices=["auto", "gpu", "cpu"], default="auto")
     parser.add_argument("--normalize", action="store_true")
     parser.add_argument("--preview-seconds", type=float, default=None)
+    parser.add_argument("--comment-offset", default="0",
+                        help="OBS録画に対するコメントの時刻補正。+12は12秒遅らせる、-8は8秒早める")
     parser.add_argument("--preview-start", default="0", help="プレビュー開始位置。例 01:15:00 または秒数")
     parser.add_argument("--auto-preview", action="store_true", help="コメントの多い区間からプレビュー")
     parser.add_argument("--settings", type=Path, default=SETTINGS_FILE, help="GUIのコメント表示設定JSON")
@@ -929,7 +966,8 @@ def main(argv: list[str] | None = None) -> int:
         path = process(vod_id, video=args.video, chat=args.chat, style=args.style,
                        position=args.position, mode=args.mode, prefer=args.encoder,
                        normalize_audio=args.normalize, preview_seconds=args.preview_seconds,
-                       preview_start=parse_time(args.preview_start), auto_preview=args.auto_preview,
+                       preview_start=parse_time(args.preview_start),
+                       comment_offset_seconds=parse_comment_offset(getattr(args, "comment_offset", "0")), auto_preview=args.auto_preview,
                        settings=load_comment_settings(args.settings),
                        output_dir=getattr(args, "output_dir", None),
                        cache_dir=getattr(args, "cache_dir", None),
