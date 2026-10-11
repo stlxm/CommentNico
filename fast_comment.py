@@ -354,6 +354,11 @@ def parse_comment_offset(value: str | float | int) -> float:
     return seconds
 
 
+def offset_between_matching_events(obs_timestamp: str, twitch_timestamp: str) -> float:
+    """Find signed chat offset when the same event is visible in both videos."""
+    return parse_comment_offset(parse_time(obs_timestamp) - parse_time(twitch_timestamp))
+
+
 def pretty_time(seconds: float) -> str:
     t = int(seconds)
     return f"{t // 3600:02}:{t // 60 % 60:02}:{t % 60:02}"
