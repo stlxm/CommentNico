@@ -26,6 +26,8 @@ jobs:
           sudo apt-get install -y ffmpeg fonts-noto-cjk
       - name: Render actual moving ASS sample video
         run: python -m scripts.sample_render_smoke
+      - name: Render OBS MKV with two independent audio tracks and shifted comments
+        run: python -m scripts.obs_mkv_smoke
 
   build-and-test:
     runs-on: windows-latest
