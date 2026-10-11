@@ -82,6 +82,8 @@ class FastCommentGUI:
         self._preview_started = time.monotonic()
         self._preview_paused_at: float | None = None
         self._preview_image = None
+        self._exact_preview_image = None
+        self._exact_preview_active = False
         self._preview_frame_path: Path | None = None
         self._preview_real_entries = None
         self._preview_start = 0.0
@@ -272,6 +274,10 @@ class FastCommentGUI:
         ttk.Button(buttons, text="実コメントから再生", command=self.load_real_comments).pack(side="left", padx=7)
         self.pause_button = ttk.Button(buttons, text="⏸ 一時停止", command=self.toggle_pause)
         self.pause_button.pack(side="left", padx=7)
+        exact_actions = ttk.Frame(right)
+        exact_actions.pack(fill="x", padx=10, pady=(0, 4))
+        ttk.Button(exact_actions, text="実際のFFmpeg描画で1コマ確認", command=self.load_exact_preview).pack(side="left")
+        ttk.Button(exact_actions, text="ライブ表示に戻す", command=self.return_live_preview).pack(side="left", padx=8)
         ttk.Button(right, text="選択済みMP4の1コマを背景に使う", command=self.load_video_background).pack(anchor="w", padx=10)
         ttk.Label(right, text="※ この画面では字幕位置・色・速さを近似表示します。文字の縁取りなど最終的な見た目は30秒MP4で確認してください。",
                   wraplength=640, foreground="#555").pack(anchor="w", padx=10, pady=10)
@@ -356,6 +362,8 @@ class FastCommentGUI:
 
     def _apply_settings_change(self):
         self._settings_job = None
+        if self._exact_preview_active:
+            self.return_live_preview()
         self._rebuild_preview()
         self.save_settings()
 
@@ -446,6 +454,7 @@ class FastCommentGUI:
             self.preview_note.set(f"表示コメント {len(self._preview_events)}件（混雑のため {dropped}件間引き）")
 
     def show_sample(self):
+        self.return_live_preview()
         self._preview_real_entries = None
         self._preview_span = 14.0
         self.preview_note.set("サンプルコメントを再生中（エンコード不要・変更を即時反映）")
@@ -453,6 +462,7 @@ class FastCommentGUI:
         self._rebuild_preview()
 
     def load_real_comments(self):
+        self.return_live_preview()
         path = Path(self.chat.get().strip()) if self.chat.get().strip() else None
         if path is None:
             try:
@@ -485,6 +495,54 @@ class FastCommentGUI:
                 self.events.put(("preview_error", str(exc)))
         threading.Thread(target=job, daemon=True).start()
 
+    def return_live_preview(self):
+        if self._exact_preview_active:
+            self._exact_preview_active = False
+            self._redraw_background()
+            self.preview_note.set("ライブプレビュー（近似表示）。正確な見た目はFFmpeg実描画で確認できます")
+            self._reset_preview_clock()
+
+    def load_exact_preview(self):
+        """Display one genuine libass-composited video frame in a worker thread."""
+        try:
+            video = Path(self.video.get().strip()) if self.video.get().strip() else None
+            chat = Path(self.chat.get().strip()) if self.chat.get().strip() else None
+            if video is None or chat is None:
+                vod_id = core.normalize_id(self.vod.get())
+                if video is None:
+                    video = CACHE_DIR / (vod_id + ".mp4")
+                if chat is None:
+                    chat = CACHE_DIR / (vod_id + ".json")
+            if not video.is_file() or not chat.is_file():
+                raise ValueError("実描画にはダウンロード済みの動画とチャットJSONが必要です。動画・出力タブで指定するか、先に30秒テストを実行してください。")
+            requested_time = self.start_time.get()
+            mode = self.time_mode.get()
+            appearance = self.current_settings()
+            style = self.style.get()
+        except (ValueError, OSError) as exc:
+            messagebox.showinfo("実描画プレビュー", str(exc))
+            return
+        self.preview_note.set("FFmpegで実際のコメントの描画を確認中…")
+        def job():
+            try:
+                if mode == "manual":
+                    start = core.parse_time(requested_time)
+                elif mode == "first":
+                    start = 0.0
+                else:
+                    _, _, duration = core.video_metadata(video, core.tool("ffprobe"))
+                    start, _ = core.suggest_preview_start(chat, 30.0, duration)
+                with tempfile.TemporaryDirectory(prefix="fast_exact_frame_") as tmp:
+                    frame_path = Path(tmp) / "frame.png"
+                    count, dropped, frame_seconds = core.render_exact_preview_frame(
+                        video, chat, frame_path, settings=appearance, style=style,
+                        start_seconds=start)
+                    self.events.put(("exact_preview_loaded",
+                                     (frame_path.read_bytes(), start + frame_seconds, count, dropped)))
+            except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+                self.events.put(("preview_error", f"FFmpegでの実描画に失敗しました: {exc}"))
+        threading.Thread(target=job, daemon=True).start()
+
     def toggle_pause(self):
         if self._preview_paused_at is None:
             self._preview_paused_at = time.monotonic()
@@ -500,7 +558,9 @@ class FastCommentGUI:
         self.canvas.delete("background")
         width = max(1, self.canvas.winfo_width())
         height = max(1, self.canvas.winfo_height())
-        if self._preview_image:
+        if self._exact_preview_active and self._exact_preview_image:
+            self.canvas.create_image(0, 0, image=self._exact_preview_image, anchor="nw", tags="background")
+        elif self._preview_image:
             self.canvas.create_image(0, 0, image=self._preview_image, anchor="nw", tags="background")
         else:
             self.canvas.create_rectangle(0, 0, width, height, fill="#142233", outline="", tags="background")
@@ -546,16 +606,25 @@ class FastCommentGUI:
                 cw = max(1, self.canvas.winfo_width())
                 ch = max(1, self.canvas.winfo_height())
                 self.canvas.delete("comments")
+                if self._exact_preview_active:
+                    return
                 sx, sy = cw / 1280, ch / 720
                 for event in self._preview_events:
                     if not event.at <= t < event.end:
                         continue
                     x = event.x_start + ((t-event.at) / (event.end-event.at)) * (event.x_end-event.x_start) if event.moving else event.x_start
-                    font_size = max(8, round(event.font_size * sy))
-                    self.canvas.create_text(x*sx + 1, event.y*sy + 1, text=event.text, font=("Meiryo", font_size, "bold"),
-                                            fill="#090909", anchor="ne" if event.align_right else "nw", tags="comments")
-                    self.canvas.create_text(x*sx, event.y*sy, text=event.text, font=("Meiryo", font_size, "bold"),
-                                            fill=event.color, anchor="ne" if event.align_right else "nw", tags="comments")
+                    # Tk positive font sizes mean POINTS (DPI-scaled), whereas
+                    # libass font_size is in pixels at PlayResY. Negative Tk
+                    # sizes request pixels, avoiding ~33% larger preview text.
+                    pixel_size = max(1, round(event.font_size * sy))
+                    font = ("Meiryo", -pixel_size, "bold")
+                    anchor = "ne" if event.align_right else "nw"
+                    outline = max(1, round(2 * sy))
+                    for dx, dy in ((-outline, 0), (outline, 0), (0, -outline), (0, outline)):
+                        self.canvas.create_text(x*sx + dx, event.y*sy + dy, text=event.text, font=font,
+                                                fill="#090909", anchor=anchor, tags="comments")
+                    self.canvas.create_text(x*sx, event.y*sy, text=event.text, font=font,
+                                            fill=event.color, anchor=anchor, tags="comments")
         finally:
             self.root.after(40, self._animate_preview)
 
@@ -701,6 +770,14 @@ class FastCommentGUI:
                 self._reset_preview_clock()
                 self._rebuild_preview()
                 self.preview_note.set(f"実コメント: {filename} / {core.pretty_time(start)} から14秒・{len(entries)}件")
+            elif event == "exact_preview_loaded":
+                import base64
+                png, timestamp, count, dropped = payload
+                self._exact_preview_image = tk.PhotoImage(data=base64.b64encode(png).decode("ascii"), format="png")
+                self._exact_preview_active = True
+                self.canvas.delete("comments")
+                self._redraw_background()
+                self.preview_note.set(f"FFmpeg実描画: {core.pretty_time(timestamp)} の1コマ（候補コメント {count} 件）／設定を変えるとライブ表示に戻ります")
             elif event == "background":
                 import base64
                 # PhotoImage accepts binary PPM data when base64-encoded as a Tk string.
