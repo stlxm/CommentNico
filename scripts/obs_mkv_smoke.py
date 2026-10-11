@@ -37,17 +37,19 @@ def main() -> None:
 
         # Model the exact user workflow: OBS MKV -> burnt-in MP4, audio copied
         # without downmixing. render() uses the same options as GUI export.
-        fc.render(ffmpeg, source, ass, result, work, mode="burn", prefer="cpu",
-                  normalize_audio=False, preview_seconds=3.0)
-        assert result.is_file() and result.stat().st_size > 0
-        probe = subprocess.run([
-            ffprobe, "-v", "error", "-show_entries",
-            "stream=codec_type,codec_name", "-of", "json", str(result)
-        ], capture_output=True, text=True, check=True)
-        streams = json.loads(probe.stdout)["streams"]
-        assert sum(s["codec_type"] == "video" for s in streams) == 1, streams
-        assert sum(s["codec_type"] == "audio" for s in streams) == 2, streams
-        print("[OK] OBS MKV -> MP4: two independent AAC tracks and chat +1.2s")
+        for normalize in (False, True):
+            dest = result.with_name("result_normalized.mp4" if normalize else "result_copy.mp4")
+            fc.render(ffmpeg, source, ass, dest, work, mode="burn", prefer="cpu",
+                      normalize_audio=normalize, preview_seconds=3.0)
+            assert dest.is_file() and dest.stat().st_size > 0
+            probe = subprocess.run([
+                ffprobe, "-v", "error", "-show_entries",
+                "stream=codec_type,codec_name", "-of", "json", str(dest)
+            ], capture_output=True, text=True, check=True)
+            streams = json.loads(probe.stdout)["streams"]
+            assert sum(s["codec_type"] == "video" for s in streams) == 1, streams
+            assert sum(s["codec_type"] == "audio" for s in streams) == 2, streams
+            print(f"[OK] OBS MKV -> MP4: two AAC tracks, normalize={normalize}, chat +1.2s")
 
 
 if __name__ == "__main__":
