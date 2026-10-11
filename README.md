@@ -14,7 +14,8 @@ Independent Windows application for Twitch VOD acquisition and comments overlay.
 - A custom output directory you can browse to and save across restarts.
 - Automatically open the folder containing the exported video after a **successful** conversion (can be disabled).
 
-- Progress / logs and cancel button.
+- Encoding progress with FFmpeg's measured speed and estimated time remaining (downloads report stage only, not an invented ETA).
+- Reliable cancellation even when Stop is pressed just as the worker process starts; cancelled runs are shown separately from errors.
 
 ## GitHub Desktop: update without downloading ZIPs
 
@@ -43,6 +44,14 @@ Before first launch, copy the following three files from your *existing working*
 Run `FastComment.exe`. Keep the two EXEs and tools folder together. Neither your old Saccubus/Java folder nor a standalone Python installation should be needed at runtime.
 
 The new user data location is `%LOCALAPPDATA%\FastComment` (or set `FASTCOMMENT_DATA_DIR`).
+
+## Finishing FastComment before final preview tuning
+
+FastComment currently focuses on a safe normal workflow: VOD ID, cached MP4/JSON reuse, optional output folder, a 30-second burn-in before full export, and NVENC on supported GPUs.
+
+Progress is a **time estimate**, not a guarantee; it is only shown while FFmpeg publishes an actual `speed=...x` measurement. Downloads and initial preparation show stages instead. Pressing **中止** stops the worker (and its child processes on Windows) without intentionally deleting original videos. A cancelled conversion is not reported as a failed codec.
+
+The final task in the release checklist is to compare live preview font size/movement to the FFmpeg MP4 export. A one-frame still cannot demonstrate movement. We are intentionally deferring this polish until download, long-running conversion, save/cancel, and safe migration have been verified.
 
 ## Comparing live preview and the actual MP4
 
