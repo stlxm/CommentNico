@@ -1,4 +1,4 @@
-param([string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot))
+﻿param([string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot))
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $toolDir = Join-Path $ProjectRoot "tools"
