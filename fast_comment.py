@@ -442,7 +442,7 @@ def render_exact_preview_frame(
         select = format(frame, ".3f").rstrip("0").rstrip(".") or "0"
         video_filter = (
             f"setpts=PTS-STARTPTS,ass=comments.ass,"
-            f"select=gte(t\\\\,{select}),scale={int(width)}:{int(height)}"
+            f"select='gte(t,{select})',scale={int(width)}:{int(height)}"
         )
         # Apply libass at every decoded frame, then select the chosen instant.
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error",
