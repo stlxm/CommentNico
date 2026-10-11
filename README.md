@@ -54,7 +54,7 @@ Because OBS recording and Twitch VOD can begin at different moments, **① 動�
 - **`+12`**: OBS started recording 12 seconds **before** the Twitch VOD started → show each chat comment 12 seconds later on the OBS video.
 - **`-8`**: OBS started recording 8 seconds **after** the Twitch VOD started → show each comment 8 seconds earlier on the OBS video.
 - Fractions (`+12.5`) and signed hour:min:sec (`-00:01:30.5`) are accepted.
-- To determine the offset, find the same visible or audible event in a Twitch VOD and in the OBS recording. **Offset = event time on OBS recording − event time on Twitch VOD.** e.g. event at OBS 00:04:20 and Twitch 00:04:05 means **`+15`**.
+- To determine the offset, find the same visible or audible event in a Twitch VOD and in the OBS recording. Enter both event timestamps in **OBS側** and **Twitch側**, then click **時刻差を計算**. **Offset = event time on OBS recording − event time on Twitch VOD.** e.g. event at OBS 00:04:20 and Twitch 00:04:05 means **`+15`**. This calculator does not analyze video/audio automatically.
 - Check a **30-second MP4 burn-in test** at a manually chosen scene, or auto-select a comment-dense window (also adjusted to the OBS timeline). The actual FFmpeg still-image preview follows the same offset. Demo-only animated sample remains independent of OBS and does not depict sync.
 - Offset corrects a constant start-time difference, not gradual clock drift or OBS pause/resume. If playback drifts, align clips in the editing tool before creating the final video.
 
