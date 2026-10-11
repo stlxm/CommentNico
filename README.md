@@ -9,6 +9,9 @@ Independent Windows application for Twitch VOD acquisition and comments overlay.
 - Live GUI preview: font size, speed, layout, row spacing, user colors, and collision settings.
 - MP4 comments burned into the video using NVIDIA NVENC (CPU fallback) or MKV with switchable ASS subtitles.
 - Audio loudness normalization and selectable 30-second previews from chat-active scenes.
+- A custom output directory you can browse to and save across restarts.
+- Automatically open the folder containing the exported video after a **successful** conversion (can be disabled).
+
 - Progress / logs and cancel button.
 
 ## Getting a Windows test build (no Python install required)
@@ -24,6 +27,16 @@ Before first launch, copy the following three files from your *existing working*
 Run `FastComment.exe`. Keep the two EXEs and tools folder together. Neither your old Saccubus/Java folder nor a standalone Python installation should be needed at runtime.
 
 The new user data location is `%LOCALAPPDATA%\FastComment` (or set `FASTCOMMENT_DATA_DIR`).
+
+## Choosing and saving your output folder
+
+Open **① 動画・出力** in FastComment. Under **出力設定**, select **出力先フォルダ → 参照…** or type an absolute path, then click **保存**. Your destination is reused automatically on later launches, even after replacing the EXEs.
+
+The **変換が完了したら保存先フォルダを自動で開く** checkbox is on by default and can be unchecked. After a successful conversion, Windows Explorer opens the folder containing the completed MP4/MKV (inside the selected root, grouped by streamer). Failed or cancelled jobs do not open folders.
+
+These options are saved to `%LOCALAPPDATA%\\FastComment\\output_preferences.json`, separate from video files and `comment_settings.json`. Existing videos remain untouched.
+
+The CLI/worker also supports `--output-dir "D:\\YourFolder\\Videos"`.
 
 ## Developer build on Windows
 
