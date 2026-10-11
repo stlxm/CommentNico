@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -14,6 +16,50 @@ CACHE_DIR = DATA_DIR / "Originals"
 OUTPUT_DIR = DATA_DIR / "Output"
 SETTINGS_FILE = DATA_DIR / "comment_settings.json"
 LOG_DIR = DATA_DIR / "logs"
+OUTPUT_PREFERENCES_FILE = DATA_DIR / "output_preferences.json"
+
+
+def resolve_output_directory(value: str | Path) -> Path:
+    """Resolve a user-selected destination without changing or creating it."""
+    if not str(value).strip():
+        raise ValueError("出力先フォルダを選択してください")
+    path = Path(value).expanduser().resolve()
+    if path.exists() and not path.is_dir():
+        raise ValueError(f"出力先がフォルダではありません: {path}")
+    return path
+
+
+@dataclass
+class OutputPreferences:
+    directory: str = str(OUTPUT_DIR)
+    open_on_complete: bool = True
+
+
+def load_output_preferences(path: Path = OUTPUT_PREFERENCES_FILE) -> OutputPreferences:
+    if not path.is_file():
+        return OutputPreferences()
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("出力先設定の形式が正しくありません")
+    directory = data.get("directory", str(OUTPUT_DIR))
+    auto_open = data.get("open_on_complete", True)
+    if not isinstance(directory, str) or not isinstance(auto_open, bool):
+        raise ValueError("出力先設定の値が正しくありません")
+    return OutputPreferences(str(resolve_output_directory(directory)), auto_open)
+
+
+def save_output_preferences(prefs: OutputPreferences, path: Path = OUTPUT_PREFERENCES_FILE) -> None:
+    directory = resolve_output_directory(prefs.directory)
+    if not isinstance(prefs.open_on_complete, bool):
+        raise ValueError("自動でフォルダを開く設定が不正です")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(
+        {"directory": str(directory), "open_on_complete": prefs.open_on_complete},
+        ensure_ascii=False, indent=2
+    ) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
 
 
 def executable(name: str) -> str:
