@@ -14,7 +14,7 @@ Independent Windows application for Twitch VOD acquisition and comments overlay.
 - A custom output directory you can browse to and save across restarts.
 - Automatically open the folder containing the exported video after a **successful** conversion (can be disabled).
 
-- Encoding progress with FFmpeg's measured speed and estimated time remaining (downloads report stage only, not an invented ETA).
+- Prominent always-visible percentage, progress bar, encoding speed and estimated time remaining, with compact diagnostic logs.
 - Reliable cancellation even when Stop is pressed just as the worker process starts; cancelled runs are shown separately from errors.
 
 ## GitHub Desktop: update without downloading ZIPs
@@ -44,6 +44,16 @@ Before first launch, copy the following three files from your *existing working*
 Run `FastComment.exe`. Keep the two EXEs and tools folder together. Neither your old Saccubus/Java folder nor a standalone Python installation should be needed at runtime.
 
 The new user data location is `%LOCALAPPDATA%\FastComment` (or set `FASTCOMMENT_DATA_DIR`).
+
+## Visible progress and readable logs
+
+The conversion controls and large **percentage/progress bar** are pinned **above the tabs** so they remain visible even while viewing the log or with a compact Windows display. The video/output settings form scrolls vertically; users never need to stretch the window just to reach **▶ 変換開始** or **■ 中止**.
+
+While FFmpeg is encoding, FastComment shows the measured **percent complete, speed and estimated remaining time**. During Twitch downloads or before measurements are available it shows a named phase instead of an invented percentage. A full encode can remain at **保存中** briefly after FFmpeg finishes, while the complete file is committed to the destination. **100%** means the output file has been successfully saved.
+
+FFmpeg's many multi-line status fields are consolidated into **one compact update about every five seconds** and displayed as a single persistent progress indicator rather than repeatedly scrolling the log. The processing log no longer wraps extremely long command strings; horizontal and vertical scrollbars are available. Critical errors and FFmpeg diagnostics are still shown.
+
+**Important during a running conversion:** GitHub Desktop pulling new code or replacing EXEs does not update an already running job. Let it finish, then close FastComment, Pull origin and restart. Do not force-close or rename the old installation during a long test.
 
 ## Accurate sample video preview (no VOD needed)
 
