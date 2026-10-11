@@ -23,7 +23,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 import fast_comment as core
 from app_paths import (APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, worker_command,
                        OutputPreferences, load_output_preferences, save_output_preferences,
-                       resolve_output_directory)
+                       resolve_output_directory, completed_output_folder)
 
 HERE = APP_DIR
 SETTINGS_PATH = SETTINGS_FILE
@@ -719,8 +719,7 @@ class FastCommentGUI:
                 self.append("正常終了" if success else f"処理失敗：{payload}")
                 if success and self.open_on_complete.get():
                     try:
-                        target = (self._completed_file.parent if self._completed_file is not None
-                                  else resolve_output_directory(self.output_directory.get()))
+                        target = completed_output_folder(self._completed_file, self.output_directory.get())
                         self._show_output_folder(target)
                     except (ValueError, OSError) as exc:
                         messagebox.showwarning("フォルダを開けませんでした", f"動画の変換は正常に完了しました。\n{exc}")
