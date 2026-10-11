@@ -45,6 +45,21 @@ Run `FastComment.exe`. Keep the two EXEs and tools folder together. Neither your
 
 The new user data location is `%LOCALAPPDATA%\FastComment` (or set `FASTCOMMENT_DATA_DIR`).
 
+## OBS MKV recording + Twitch chat timeline synchronization
+
+FastComment accepts a local OBS **MKV** as the video source while fetching the matching Twitch chat JSON by **VOD ID** (or using a previously downloaded JSON). OBS audio streams are mapped individually via `-map 0:a?` so multi-track microphone/game/Discord audio is not intentionally mixed. For MP4 burn-in, audio normalization ON re-encodes audio as AAC; OFF tries to copy the source codecs, which may not be MP4-compatible. Test a short clip before encoding the full VOD. MKV soft-subtitle mode retains source codecs but does not burn comments into the picture.
+
+Because OBS recording and Twitch VOD can begin at different moments, **① 動画・出力 → OBS録画とTwitchコメントの時刻合わせ** provides a signed, per-export comment time offset. It is **not automatic**; default is 0 seconds and the value is not reused for another recording.
+
+- **`+12`**: OBS started recording 12 seconds **before** the Twitch VOD started → show each chat comment 12 seconds later on the OBS video.
+- **`-8`**: OBS started recording 8 seconds **after** the Twitch VOD started → show each comment 8 seconds earlier on the OBS video.
+- Fractions (`+12.5`) and signed hour:min:sec (`-00:01:30.5`) are accepted.
+- To determine the offset, find the same visible or audible event in a Twitch VOD and in the OBS recording. **Offset = event time on OBS recording − event time on Twitch VOD.** e.g. event at OBS 00:04:20 and Twitch 00:04:05 means **`+15`**.
+- Check a **30-second MP4 burn-in test** at a manually chosen scene, or auto-select a comment-dense window (also adjusted to the OBS timeline). The actual FFmpeg still-image preview follows the same offset. Demo-only animated sample remains independent of OBS and does not depict sync.
+- Offset corrects a constant start-time difference, not gradual clock drift or OBS pause/resume. If playback drifts, align clips in the editing tool before creating the final video.
+
+You can now keep original multi-track OBS recording for later editing while burning Twitch chat into an MP4; verify separate audio streams in the output using FFprobe before discarding anything.
+
 ## Visible progress and readable logs
 
 The conversion controls and large **percentage/progress bar** are pinned **above the tabs** so they remain visible even while viewing the log or with a compact Windows display. The video/output settings form scrolls vertically; users never need to stretch the window just to reach **▶ 変換開始** or **■ 中止**.
