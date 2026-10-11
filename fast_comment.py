@@ -458,73 +458,53 @@ def render_exact_preview_frame(
 
 
 
-def render_motion_preview(
-    video: Path | None, chat: Path | None, *, settings: CommentSettings, style: str,
-    start_seconds: float = 0.0, duration_seconds: float = 8.0,
-    fps: int = 12, width: int = 640, height: int = 360,
-    work_dir: Path | None = None, sample_entries: list[dict] | None = None
-) -> tuple[list[bytes], int, int]:
-    """Render sample or real moving comments with FFmpeg's final ASS engine.
 
-    When sample_entries are provided, FFmpeg generates an animated sample
-    background itself. No MP4/JSON is required from the user.
+def render_sample_comment_preview(
+    entries: list[dict], settings: CommentSettings, style: str,
+    output_file: Path, *, frame_at: float = 5.0,
+    source_width: int = 1280, source_height: int = 720,
+    preview_width: int = 640, preview_height: int = 360
+) -> int:
+    """Render a genuine FFmpeg/libass still using demo comments; no VOD needed.
+
+    Uses the exact same ASS creation/layout as normal video export. Renders at
+    720p before downscaling to the GUI's 640x360 canvas.
     """
-    if not (1 <= fps <= 24 and 1 <= duration_seconds <= 15):
-        raise ValueError("動くプレビューの時間またはFPSが不正です")
+    if not 0.0 <= frame_at <= 10.0:
+        raise ValueError("サンプルの表示時刻が不正です")
     ffmpeg = tool("ffmpeg")
-    using_sample = sample_entries is not None
-    if using_sample:
-        source_width, source_height = 1280, 720
-        start = 0.0
-        available = float(duration_seconds)
-    else:
-        if video is None or chat is None:
-            raise ValueError("配信動画のプレビューには動画とJSONの両方が必要です")
-        source_width, source_height, source_duration = video_metadata(video, tool("ffprobe"))
-        start = parse_time(start_seconds)
-        if source_duration is not None and start >= source_duration:
-            raise ValueError("プレビュー開始位置が動画の終了より後です")
-        available = (duration_seconds if source_duration is None else
-                     min(duration_seconds, source_duration-start))
-    if available <= 0:
-        raise ValueError("プレビュー対象の動画が短すぎます")
-
     from app_paths import DATA_DIR
-    work_root = resolve_output_directory(work_dir) if work_dir is not None else DATA_DIR
-    work_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="fast_motion_", dir=work_root) as temp:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="fast_sample_still_", dir=DATA_DIR) as temp:
         work = Path(temp)
-        ass = work / "comments.ass"
-        if using_sample:
-            chat = work / "sample.json"
-            chat.write_text(json.dumps({"comments": sample_entries}, ensure_ascii=False), encoding="utf-8")
-        count, dropped = convert_chat_to_ass(
-            chat, ass, source_width, source_height,
-            Options(style, "right", float(available), start, settings))
-        command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
-        if using_sample:
-            # Moving sample background; compositing resolution equals output
-            # layout resolution BEFORE scaling, exactly as in an MP4 burn-in.
-            command += ["-f", "lavfi", "-i",
-                        f"testsrc2=size=1280x720:rate={fps}:duration={available}"]
-        else:
-            command += ["-ss", str(start), "-i", str(video)]
-        command += [
-            "-t", str(available), "-an",
-            "-vf", f"setpts=PTS-STARTPTS,ass=comments.ass,fps={fps},scale={int(width)}:{int(height)}",
-            "-frames:v", str(math.ceil(available * fps)),
-            "-fps_mode", "vfr", "-y", "frame_%04d.png"
+        sample_json = work / "demo.json"
+        sample_json.write_text(json.dumps({"comments": entries}, ensure_ascii=False), encoding="utf-8")
+        ass_path = work / "comments.ass"
+        count, _ = convert_chat_to_ass(
+            sample_json, ass_path, source_width, source_height,
+            Options(style, "right", 12.0, 0.0, settings))
+        # Decode a few seconds of a synthetic frame source. Applying ASS
+        # before choosing the 5-second frame preserves real text positions.
+        vf = ("setpts=PTS-STARTPTS,ass=comments.ass,"
+              f"select='gte(t,{frame_at:g})',scale={preview_width}:{preview_height}")
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i",
+            f"testsrc2=size={source_width}x{source_height}:rate=12:duration={frame_at + 0.5:g}",
+            "-an", "-vf", vf, "-frames:v", "1",
+            "-fps_mode", "vfr", "-y", "sample.png"
         ]
-        result = subprocess.run(
-            command, cwd=work, capture_output=True, text=True, errors="replace",
-            timeout=180, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-        if result.returncode != 0:
-            raise RuntimeError("動くプレビューの生成に失敗しました: " + (result.stderr or "")[-800:])
-        files = sorted(work.glob("frame_*.png"))
-        if not files:
-            raise RuntimeError("動くプレビュー用の画像が作成されませんでした")
-        frames = [path.read_bytes() for path in files]
-        return frames, fps, count
+        result = subprocess.run(command, cwd=work, capture_output=True,
+                                text=True, errors="replace", timeout=120,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        if result.returncode:
+            raise RuntimeError("サンプル画像のFFmpeg描画に失敗しました: " + (result.stderr or "")[-900:])
+        rendered = work / "sample.png"
+        if not rendered.is_file() or rendered.stat().st_size == 0:
+            raise RuntimeError("サンプル画像が作成されませんでした")
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_bytes(rendered.read_bytes())
+        return count
 
 
 def encoder_candidates(ffmpeg: str, prefer: str) -> list[tuple[str, list[str]]]:
