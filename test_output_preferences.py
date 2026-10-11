@@ -1,12 +1,14 @@
 from __future__ import annotations
 import json
 import tempfile
+import queue
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import app_paths
 import fast_comment as fc
+import fast_comment_gui as gui_module
 
 
 class OutputDirectoryTests(unittest.TestCase):
@@ -65,6 +67,46 @@ class OutputDirectoryTests(unittest.TestCase):
             with patch.object(fc, "process", return_value=Path(td) / "done.mp4") as job:
                 self.assertEqual(fc.main(["--vod", "2896810049", "--output-dir", str(directory)]), 0)
             self.assertEqual(job.call_args.kwargs["output_dir"], directory)
+
+    def test_gui_opens_exact_video_folder_only_after_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dest = root / "streamer"
+            dest.mkdir()
+            video = dest / "clip.mp4"
+            video.write_bytes(b"sample")
+            gui = object.__new__(gui_module.FastCommentGUI)
+            gui.events = queue.Queue()
+            gui.busy = True
+            gui._completed_file = None
+            gui._read_progress = MagicMock()
+            gui.append = MagicMock()
+            gui.root = MagicMock()
+            gui.start_button = MagicMock()
+            gui.cancel_button = MagicMock()
+            gui.progressbar = MagicMock()
+            gui.status = MagicMock()
+            gui._show_output_folder = MagicMock()
+            gui.open_on_complete = MagicMock()
+            gui.open_on_complete.get.return_value = True
+            gui.output_directory = MagicMock()
+            gui.output_directory.get.return_value = str(root)
+
+            gui.events.put(("log", f"完成動画: {video}"))
+            gui.events.put(("done", 0))
+            gui.poll()
+            gui._show_output_folder.assert_called_once_with(dest)
+            self.assertFalse(gui.busy)
+
+            gui._show_output_folder.reset_mock()
+            gui.events.put(("done", 1))
+            gui.poll()
+            gui._show_output_folder.assert_not_called()
+
+            gui.open_on_complete.get.return_value = False
+            gui.events.put(("done", 0))
+            gui.poll()
+            gui._show_output_folder.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
