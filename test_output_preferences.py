@@ -49,7 +49,7 @@ class OutputDirectoryTests(unittest.TestCase):
             }), encoding="utf-8")
             dest_root = root / "my results"
             first = fc.output_path(chat, "2896810049", "nico", "burn", 30, output_dir=dest_root)
-            self.assertEqual(first.parent, dest_root / "streamer")
+            self.assertEqual(first.parent, (dest_root / "streamer").resolve())
             self.assertEqual(first.suffix, ".mp4")
             first.parent.mkdir(parents=True, exist_ok=True)
             first.write_text("keep", encoding="utf-8")
