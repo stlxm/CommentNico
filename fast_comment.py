@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from app_paths import APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, executable
+from app_paths import APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, executable, resolve_output_directory
 ROOT = APP_DIR
 CACHE = CACHE_DIR
 OUTPUT = OUTPUT_DIR
@@ -489,13 +489,13 @@ def render(ffmpeg: str, source: Path, ass: Path, dest: Path, work: Path,
     raise RuntimeError("すべてのエンコード方式が失敗しました。\n" + "\n".join(errors))
 
 
-def output_path(chat: Path, vod_id: str, style: str, mode: str, preview: float | None, preview_start: float = 0.0) -> Path:
+def output_path(chat: Path, vod_id: str, style: str, mode: str, preview: float | None, preview_start: float = 0.0, output_dir: Path | None = None) -> Path:
     data = json.loads(chat.read_text(encoding="utf-8-sig"))
     streamer = safe_name(str((data.get("streamer") or {}).get("name") or "unknown"))
     video = data.get("video") or {}
     date = safe_name(str(video.get("created_at") or "unknown")[:10])
     title = safe_name(str(video.get("title") or vod_id))
-    folder = OUTPUT / streamer
+    folder = (resolve_output_directory(output_dir) if output_dir is not None else OUTPUT) / streamer
     stem = f"{date}_{title}_{vod_id}_{style}_fast" + (f"_PREVIEW_{int(preview_start):06}s" if preview else "")
     suffix = ".mkv" if mode == "soft" else ".mp4"
     dest = folder / (stem + suffix)
@@ -509,7 +509,8 @@ def output_path(chat: Path, vod_id: str, style: str, mode: str, preview: float |
 def process(vod_id: str, *, video: Path | None, chat: Path | None, style: str,
             position: str, mode: str, prefer: str, normalize_audio: bool,
             preview_seconds: float | None, preview_start: float = 0.0,
-            auto_preview: bool = False, settings: CommentSettings | None = None) -> Path:
+            auto_preview: bool = False, settings: CommentSettings | None = None,
+            output_dir: Path | None = None) -> Path:
     if not vod_id and (video is None or chat is None):
         raise ValueError("動画またはJSONが不足している場合はVOD IDを入力してください")
     if not vod_id:
@@ -552,7 +553,7 @@ def process(vod_id: str, *, video: Path | None, chat: Path | None, style: str,
         count, overlaps = convert_chat_to_ass(chat, ass, w, h, Options(style, position, preview_seconds, preview_start, settings or CommentSettings()))
         kind = "間引き" if (settings and settings.collision == "skip") else "重なりの可能性"
         print(f"字幕: {count}件（混雑時の{kind}: {overlaps}件）")
-        dest = output_path(chat, vod_id, style, mode, preview_seconds, preview_start)
+        dest = output_path(chat, vod_id, style, mode, preview_seconds, preview_start, output_dir=output_dir)
         label = render(ffmpeg, video, ass, dest, work, mode=mode, prefer=prefer,
                        normalize_audio=normalize_audio, preview_seconds=preview_seconds,
                        preview_start=preview_start)
@@ -659,6 +660,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--preview-start", default="0", help="プレビュー開始位置。例 01:15:00 または秒数")
     parser.add_argument("--auto-preview", action="store_true", help="コメントの多い区間からプレビュー")
     parser.add_argument("--settings", type=Path, default=SETTINGS_FILE, help="GUIのコメント表示設定JSON")
+    parser.add_argument("--output-dir", type=Path, help="完成動画の保存先フォルダ（配信者別に分類）")
     supplied = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(supplied) if supplied else interactive()
     if not args.vod and (not args.video or not args.chat):
@@ -675,7 +677,8 @@ def main(argv: list[str] | None = None) -> int:
                        position=args.position, mode=args.mode, prefer=args.encoder,
                        normalize_audio=args.normalize, preview_seconds=args.preview_seconds,
                        preview_start=parse_time(args.preview_start), auto_preview=args.auto_preview,
-                       settings=load_comment_settings(args.settings))
+                       settings=load_comment_settings(args.settings),
+                       output_dir=getattr(args, "output_dir", None))
         print(f"処理時間: {time.monotonic() - started:.1f}秒")
         print(f"完成動画: {path}")
         return 0
