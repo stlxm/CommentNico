@@ -94,6 +94,14 @@ class FastCommentGUI:
         self._preview_image = None
         self._exact_preview_image = None
         self._exact_preview_active = False
+        self._motion_preview_active = False
+        self._motion_preview_mode: str | None = None
+        self._motion_request_id = 0
+        self._motion_frames: list[bytes] = []
+        self._motion_fps = 12
+        self._motion_frame_index = -1
+        self._motion_preview_image = None
+        self._motion_refresh_job = None
         self._preview_frame_path: Path | None = None
         self._preview_real_entries = None
         self._preview_start = 0.0
@@ -146,6 +154,7 @@ class FastCommentGUI:
         self._rebuild_preview()
         root.after(40, self._animate_preview)
         root.after(100, self.poll)
+        root.after(700, self.load_motion_preview)  # Exact sample auto-starts, no MP4 required.
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     @staticmethod
@@ -288,16 +297,17 @@ class FastCommentGUI:
         ttk.Label(right, textvariable=self.preview_note, foreground="#525252", wraplength=645).pack(anchor="w", padx=10, pady=(7, 0))
         buttons = ttk.Frame(right)
         buttons.pack(fill="x", padx=10, pady=8)
-        ttk.Button(buttons, text="▶ サンプルを再生", command=self.show_sample).pack(side="left")
+        ttk.Button(buttons, text="▶ サンプル動画で再生", command=self.load_motion_preview).pack(side="left")
         ttk.Button(buttons, text="実コメントから再生", command=self.load_real_comments).pack(side="left", padx=7)
         self.pause_button = ttk.Button(buttons, text="⏸ 一時停止", command=self.toggle_pause)
         self.pause_button.pack(side="left", padx=7)
         exact_actions = ttk.Frame(right)
         exact_actions.pack(fill="x", padx=10, pady=(0, 4))
-        ttk.Button(exact_actions, text="実際のFFmpeg描画で1コマ確認", command=self.load_exact_preview).pack(side="left")
+        ttk.Button(exact_actions, text="▶ 設定通りに動く実描画プレビュー", command=self.load_motion_preview).pack(side="left")
+        ttk.Button(exact_actions, text="実際の配信動画で確認", command=lambda: self.load_motion_preview(use_real=True)).pack(side="left", padx=8)
         ttk.Button(exact_actions, text="ライブ表示に戻す", command=self.return_live_preview).pack(side="left", padx=8)
         ttk.Button(right, text="選択済みMP4の1コマを背景に使う", command=self.load_video_background).pack(anchor="w", padx=10)
-        ttk.Label(right, text="※ この画面では字幕位置・色・速さを近似表示します。文字の縁取りなど最終的な見た目は30秒MP4で確認してください。",
+        ttk.Label(right, text="実描画はFFmpegと同じASS字幕を使用します。文字サイズ・色・速度・行間を変更すると自動更新します。サンプル動画とコメントで確認可能です。",
                   wraplength=640, foreground="#555").pack(anchor="w", padx=10, pady=10)
         self._redraw_background()
 
