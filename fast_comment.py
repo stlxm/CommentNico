@@ -356,6 +356,8 @@ def parse_comment_offset(value: str | float | int) -> float:
 
 def offset_between_matching_events(obs_timestamp: str, twitch_timestamp: str) -> float:
     """Find signed chat offset when the same event is visible in both videos."""
+    if not str(obs_timestamp).strip() or not str(twitch_timestamp).strip():
+        raise ValueError("OBS側とTwitch側の時刻を両方入力してください")
     return parse_comment_offset(parse_time(obs_timestamp) - parse_time(twitch_timestamp))
 
 
