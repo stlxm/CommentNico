@@ -21,7 +21,9 @@ import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 import fast_comment as core
-from app_paths import APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, worker_command
+from app_paths import (APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, worker_command,
+                       OutputPreferences, load_output_preferences, save_output_preferences,
+                       resolve_output_directory, completed_output_folder)
 
 HERE = APP_DIR
 SETTINGS_PATH = SETTINGS_FILE
@@ -50,6 +52,14 @@ class FastCommentGUI:
         root.title("FastComment 2.0 — ライブプレビュー付き高速コメント合成")
         root.geometry("1110x805")
         root.minsize(900, 690)
+        try:
+            output_prefs = load_output_preferences()
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            messagebox.showwarning("出力先設定の読み込み失敗", f"既定の出力先で起動します。\n{exc}")
+            output_prefs = OutputPreferences()
+        self.output_directory = tk.StringVar(value=output_prefs.directory)
+        self.open_on_complete = tk.BooleanVar(value=output_prefs.open_on_complete)
+        self._completed_file: Path | None = None
         self.vod = tk.StringVar()
         self.video = tk.StringVar()
         self.chat = tk.StringVar()
@@ -168,6 +178,14 @@ class FastCommentGUI:
         ttk.Label(r, text=" auto = NVIDIA GPU 優先（失敗時CPU）", foreground="#555").pack(side="left", padx=(8, 0))
         self.normal_control = ttk.Checkbutton(opts, text="音声ノーマライズを同時に実行（MP4のみ）", variable=self.normal)
         self.normal_control.pack(anchor="w", pady=6)
+        dest_row = ttk.Frame(opts)
+        dest_row.pack(fill="x", pady=4)
+        ttk.Label(dest_row, text="出力先フォルダ", width=18).pack(side="left")
+        ttk.Entry(dest_row, textvariable=self.output_directory).pack(side="left", fill="x", expand=True)
+        ttk.Button(dest_row, text="参照…", command=self.browse_output_directory).pack(side="left", padx=(8, 0))
+        ttk.Button(dest_row, text="保存", command=lambda: self.save_output_preferences(show=True)).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(opts, text="変換が完了したら保存先フォルダを自動で開く",
+                        variable=self.open_on_complete, command=self.save_output_preferences).pack(anchor="w", pady=(2, 0))
         test = ttk.LabelFrame(frame, text="テスト範囲", padding=12)
         test.pack(fill="x", pady=(12, 0))
         ttk.Checkbutton(test, text="30秒だけ動画を書き出して確認（推奨）", variable=self.preview,
@@ -288,6 +306,34 @@ class FastCommentGUI:
         path = filedialog.askopenfilename(parent=self.root, title=title, filetypes=filetypes)
         if path:
             variable.set(path)
+
+    def browse_output_directory(self):
+        current = Path(self.output_directory.get().strip()).expanduser()
+        start = current if current.is_dir() else OUTPUT_DIR.parent
+        chosen = filedialog.askdirectory(parent=self.root, title="完成動画の保存先を選択",
+                                          initialdir=str(start))
+        if chosen:
+            self.output_directory.set(chosen)
+            self.save_output_preferences()
+
+    def save_output_preferences(self, *, show=False):
+        try:
+            destination = resolve_output_directory(self.output_directory.get())
+            save_output_preferences(OutputPreferences(str(destination), self.open_on_complete.get()))
+            if show:
+                messagebox.showinfo("保存しました", "出力先と自動で開く設定を保存しました。次回起動時にも使います。")
+            return True
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("出力先の保存失敗", str(exc))
+            return False
+
+    def _show_output_folder(self, folder: Path):
+        if not folder.is_dir():
+            raise FileNotFoundError(f"フォルダが見つかりません: {folder}")
+        if os.name == "nt":
+            os.startfile(str(folder))
+        else:
+            messagebox.showinfo("保存先", str(folder))
 
     def _sync_options(self):
         burn = self.mode.get() == "burn"
@@ -514,12 +560,12 @@ class FastCommentGUI:
             self.root.after(40, self._animate_preview)
 
     def open_output(self):
-        target = OUTPUT_DIR
-        target.mkdir(exist_ok=True)
-        if os.name == "nt":
-            os.startfile(str(target))
-        else:
-            messagebox.showinfo("保存先", str(target))
+        try:
+            target = resolve_output_directory(self.output_directory.get())
+            target.mkdir(parents=True, exist_ok=True)
+            self._show_output_folder(target)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("出力先フォルダを開けません", str(exc))
 
     def append(self, message):
         self.log.configure(state="normal")
@@ -545,12 +591,15 @@ class FastCommentGUI:
         except (ValueError, OSError) as exc:
             messagebox.showerror("入力の確認", str(exc))
             return
+        if not self.save_output_preferences():
+            return
         self.save_settings()
         try:
             args = worker_command() + ["--style", self.style.get(), "--mode", self.mode.get(), "--settings", str(SETTINGS_PATH)]
         except OSError as exc:
             messagebox.showerror("起動エラー", str(exc))
             return
+        args += ["--output-dir", str(resolve_output_directory(self.output_directory.get()))]
         if vod_id:
             args += ["--vod", vod_id]
         if self.video.get().strip():
@@ -567,6 +616,7 @@ class FastCommentGUI:
                 args += ["--auto-preview"]
             elif self.time_mode.get() == "manual":
                 args += ["--preview-start", self.start_time.get()]
+        self._completed_file = None
         self.busy = True
         self._total_seconds = 30.0 if self.preview.get() else None
         self._processed_seconds = 0.0
@@ -636,6 +686,10 @@ class FastCommentGUI:
             except queue.Empty:
                 break
             if event == "log":
+                if payload.startswith("完成動画: "):
+                    candidate = Path(payload[len("完成動画: "):].strip())
+                    if candidate.is_file():
+                        self._completed_file = candidate
                 self._read_progress(payload)
                 if not (payload.startswith(("frame=", "fps=", "out_time=", "speed=", "bitrate=", "total_size=", "out_time_ms=", "out_time_us=", "dup_frames=", "drop_frames=", "stream_", "progress="))):
                     self.append(payload)
@@ -663,6 +717,12 @@ class FastCommentGUI:
                 self.progressbar.configure(value=100 if success else 0)
                 self.status.set("変換完了。出力フォルダを確認してください" if success else "失敗しました。ログを確認してください")
                 self.append("正常終了" if success else f"処理失敗：{payload}")
+                if success and self.open_on_complete.get():
+                    try:
+                        target = completed_output_folder(self._completed_file, self.output_directory.get())
+                        self._show_output_folder(target)
+                    except (ValueError, OSError) as exc:
+                        messagebox.showwarning("フォルダを開けませんでした", f"動画の変換は正常に完了しました。\n{exc}")
         self.root.after(100, self.poll)
 
     def on_close(self):
@@ -671,6 +731,8 @@ class FastCommentGUI:
             return
         if self._settings_job is not None:
             self.root.after_cancel(self._settings_job)
+        if not self.save_output_preferences():
+            return
         self.save_settings()
         self.root.destroy()
 
