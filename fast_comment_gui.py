@@ -98,6 +98,9 @@ class FastCommentGUI:
         self._sample_preview_pending = False
         self._sample_preview_generation = 0
         self._sample_preview_image = None
+        self._sample_preview_frames: list[bytes] = []
+        self._sample_preview_fps = 12
+        self._sample_preview_index = -1
         self._sample_preview_job = None
         self._preview_frame_path: Path | None = None
         self._preview_real_entries = None
@@ -287,14 +290,14 @@ class FastCommentGUI:
         ttk.Button(btns, text="設定を保存", command=lambda: self.save_settings(show=True)).pack(side="left")
         ttk.Button(btns, text="初期値に戻す", command=self.reset_settings).pack(side="left", padx=8)
 
-        ttk.Label(right, text="完成動画と同じ描画・サンプル静止画", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=10, pady=(0, 6))
+        ttk.Label(right, text="完成動画と同じ描画・サンプル動画", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=10, pady=(0, 6))
         self.canvas = tk.Canvas(right, width=640, height=360, background="#111827", highlightthickness=1, highlightbackground="#444")
         self.canvas.pack(fill="both", expand=False, padx=10)
         self.canvas.bind("<Configure>", lambda e: self._redraw_background())
         ttk.Label(right, textvariable=self.preview_note, foreground="#525252", wraplength=645).pack(anchor="w", padx=10, pady=(7, 0))
         buttons = ttk.Frame(right)
         buttons.pack(fill="x", padx=10, pady=8)
-        ttk.Button(buttons, text="サンプル画像を更新", command=self.render_sample_preview).pack(side="left")
+        ttk.Button(buttons, text="▶ サンプル動画を再生・更新", command=self.render_sample_preview).pack(side="left")
         ttk.Button(buttons, text="実コメントから再生", command=self.load_real_comments).pack(side="left", padx=7)
         self.pause_button = ttk.Button(buttons, text="⏸ 一時停止", command=self.toggle_pause)
         self.pause_button.pack(side="left", padx=7)
@@ -303,7 +306,7 @@ class FastCommentGUI:
         ttk.Button(exact_actions, text="実配信の1コマを確認（任意）", command=self.load_exact_preview).pack(side="left")
         ttk.Button(exact_actions, text="ライブ表示に戻す", command=self.return_live_preview).pack(side="left", padx=8)
         ttk.Button(right, text="選択済みMP4の1コマを背景に使う", command=self.load_video_background).pack(anchor="w", padx=10)
-        ttk.Label(right, text="サンプル画像も実際の書き出しと同じASS／FFmpegで描画。設定を変更すると画像を自動更新します。静止画では動く速さ自体は確認できません。",
+        ttk.Label(right, text="サンプル動画は書き出しと同じASS／FFmpegで描画します。文字のサイズ・色・縁取り・速さ・重なりを確認できます。設定変更で自動生成します。",
                   wraplength=640, foreground="#555").pack(anchor="w", padx=10, pady=10)
         self._redraw_background()
 
@@ -408,7 +411,7 @@ class FastCommentGUI:
         if self._sample_preview_job is not None:
             self.root.after_cancel(self._sample_preview_job)
         self._sample_preview_job = self.root.after(700, self.render_sample_preview)
-        self.preview_note.set("変更した設定で実描画のサンプル画像を更新中…")
+        self.preview_note.set("変更した設定でサンプル動画を再作成中…")
 
     def _apply_settings_change(self):
         self._settings_job = None
@@ -548,6 +551,8 @@ class FastCommentGUI:
         self._exact_preview_active = False
         self._sample_preview_active = False
         self._sample_preview_pending = False
+        self._sample_preview_frames = []
+        self._sample_preview_index = -1
         self._sample_preview_generation += 1
         if had_image:
             self._redraw_background()
@@ -555,7 +560,7 @@ class FastCommentGUI:
             self._reset_preview_clock()
 
     def render_sample_preview(self):
-        """Re-render the sample in FFmpeg/ASS, exactly as exported captions."""
+        """Generate a moving example using the same FFmpeg ASS overlay as exports."""
         self._sample_preview_job = None
         self._sample_preview_generation += 1
         generation = self._sample_preview_generation
@@ -564,13 +569,11 @@ class FastCommentGUI:
         self._sample_preview_pending = True
         self._sample_preview_active = False
         self._exact_preview_active = False
-        self.preview_note.set("FFmpegでサンプル画像を作成中…")
+        self.preview_note.set("FFmpegで8秒間のサンプル動画を生成中…")
         def job():
             try:
-                with tempfile.TemporaryDirectory(prefix="fast_sample_") as tmp:
-                    image_file = Path(tmp) / "sample.png"
-                    count = core.render_sample_comment_preview(SAMPLE_ENTRIES, cfg, style, image_file)
-                    self.events.put(("sample_preview_loaded", (generation, image_file.read_bytes(), count)))
+                frames, fps, count = core.render_sample_video_preview(SAMPLE_ENTRIES, cfg, style)
+                self.events.put(("sample_preview_loaded", (generation, frames, fps, count)))
             except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 self.events.put(("sample_preview_error", (generation, str(exc))))
         threading.Thread(target=job, daemon=True).start()
@@ -681,9 +684,19 @@ class FastCommentGUI:
                 cw = max(1, self.canvas.winfo_width())
                 ch = max(1, self.canvas.winfo_height())
                 self.canvas.delete("comments")
-                if (getattr(self, "_sample_preview_active", False)
-                        or getattr(self, "_sample_preview_pending", False)
-                        or self._exact_preview_active):
+                if getattr(self, "_sample_preview_active", False):
+                    if self._sample_preview_frames:
+                        import base64
+                        frame_index = (int((now - self._preview_started) * self._sample_preview_fps)
+                                       % len(self._sample_preview_frames))
+                        if frame_index != self._sample_preview_index:
+                            self._sample_preview_index = frame_index
+                            data = self._sample_preview_frames[frame_index]
+                            self._sample_preview_image = tk.PhotoImage(
+                                data=base64.b64encode(data).decode("ascii"), format="png")
+                            self._redraw_background()
+                    return
+                if getattr(self, "_sample_preview_pending", False) or self._exact_preview_active:
                     return
                 sx, sy = cw / 1280, ch / 720
                 for event in self._preview_events:
@@ -884,17 +897,20 @@ class FastCommentGUI:
                 self._rebuild_preview()
                 self.preview_note.set(f"実コメント: {filename} / {core.pretty_time(start)} から14秒・{len(entries)}件")
             elif event == "sample_preview_loaded":
-                import base64
-                generation, png, count = payload
+                generation, frames, fps, count = payload
                 if generation != self._sample_preview_generation:
                     continue
-                self._sample_preview_image = tk.PhotoImage(data=base64.b64encode(png).decode("ascii"), format="png")
+                self._sample_preview_frames = frames
+                self._sample_preview_fps = fps
+                self._sample_preview_index = -1
                 self._sample_preview_pending = False
                 self._sample_preview_active = True
                 self._exact_preview_active = False
+                self._reset_preview_clock()
                 self.canvas.delete("comments")
-                self._redraw_background()
-                self.preview_note.set(f"FFmpeg実描画・サンプル静止画（5秒時点、{count}件を処理）。設定変更で自動更新")
+                self.preview_note.set(
+                    f"FFmpeg実描画・8秒のサンプル動画（{fps}fps / コメント{count}件）。"
+                    "設定変更後に自動更新、停止・再生も可能です。")
             elif event == "sample_preview_error":
                 generation, message = payload
                 if generation == self._sample_preview_generation:
