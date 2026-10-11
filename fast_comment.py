@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from app_paths import APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, executable, resolve_output_directory
+from app_paths import APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, executable, resolve_output_directory, work_directory_for_output
 ROOT = APP_DIR
 CACHE = CACHE_DIR
 OUTPUT = OUTPUT_DIR
@@ -593,7 +593,8 @@ def process(vod_id: str, *, video: Path | None, chat: Path | None, style: str,
             position: str, mode: str, prefer: str, normalize_audio: bool,
             preview_seconds: float | None, preview_start: float = 0.0,
             auto_preview: bool = False, settings: CommentSettings | None = None,
-            output_dir: Path | None = None) -> Path:
+            output_dir: Path | None = None, cache_dir: Path | None = None,
+            work_dir: Path | None = None) -> Path:
     if not vod_id and (video is None or chat is None):
         raise ValueError("動画またはJSONが不足している場合はVOD IDを入力してください")
     if not vod_id:
@@ -602,15 +603,16 @@ def process(vod_id: str, *, video: Path | None, chat: Path | None, style: str,
     ffmpeg = tool("ffmpeg")
     ffprobe = tool("ffprobe")
     cli = tool("TwitchDownloaderCLI") if video is None or chat is None else None
-    CACHE.mkdir(parents=True, exist_ok=True)
+    cache_root = resolve_output_directory(cache_dir) if cache_dir is not None else CACHE
+    cache_root.mkdir(parents=True, exist_ok=True)
     if video is not None:
         video = video.expanduser().resolve()
     if chat is not None:
         chat = chat.expanduser().resolve()
     if video is None:
-        video = download(cli or tool("TwitchDownloaderCLI"), "videodownload", vod_id, CACHE / f"{vod_id}.mp4", ffprobe)
+        video = download(cli or tool("TwitchDownloaderCLI"), "videodownload", vod_id, cache_root / f"{vod_id}.mp4", ffprobe)
     if chat is None:
-        chat = download(cli or tool("TwitchDownloaderCLI"), "chatdownload", vod_id, CACHE / f"{vod_id}.json")
+        chat = download(cli or tool("TwitchDownloaderCLI"), "chatdownload", vod_id, cache_root / f"{vod_id}.json")
     w, h, duration = video_metadata(video, ffprobe)
     print(f"動画: {w}x{h}  時間: {duration or '不明'}秒  サイズ: {video.stat().st_size / 1024 ** 2:.1f}MB")
     if auto_preview:
@@ -628,9 +630,17 @@ def process(vod_id: str, *, video: Path | None, chat: Path | None, style: str,
         print(f"[OK] テスト範囲: {pretty_time(preview_start)} から {preview_seconds:g}秒")
     elif preview_start:
         raise ValueError("開始位置の指定にはプレビューを有効にしてください")
-    from app_paths import DATA_DIR
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="fast_comments_", dir=DATA_DIR) as temp:
+    # Avoid filling C: with gigabytes of intermediate video when output is on D:.
+    work_root = (resolve_output_directory(work_dir) if work_dir is not None else
+                 work_directory_for_output(output_dir if output_dir is not None else OUTPUT))
+    work_root.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(work_root).free
+    if free < 512 * 1024 ** 2:
+        raise OSError(f"作業先の空き容量が512MB未満です: {work_root}。保存先を変更してください")
+    if preview_seconds is None and video.stat().st_size > free * 0.8:
+        print(f"[WARN] 完成動画と作業用に空き容量が不足する可能性があります: 残り {free / 1024**3:.1f} GB", flush=True)
+    print(f"[INFO] 一時動画の保存先: {work_root}", flush=True)
+    with tempfile.TemporaryDirectory(prefix="fast_comments_", dir=work_root) as temp:
         work = Path(temp)
         ass = work / "comments.ass"
         count, overlaps = convert_chat_to_ass(chat, ass, w, h, Options(style, position, preview_seconds, preview_start, settings or CommentSettings()))
@@ -744,6 +754,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--auto-preview", action="store_true", help="コメントの多い区間からプレビュー")
     parser.add_argument("--settings", type=Path, default=SETTINGS_FILE, help="GUIのコメント表示設定JSON")
     parser.add_argument("--output-dir", type=Path, help="完成動画の保存先フォルダ（配信者別に分類）")
+    parser.add_argument("--cache-dir", type=Path, help="動画MP4とチャットJSONの再利用キャッシュ保存先")
+    parser.add_argument("--work-dir", type=Path, help="エンコードの一時作業ファイルの場所")
     supplied = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(supplied) if supplied else interactive()
     if not args.vod and (not args.video or not args.chat):
@@ -761,7 +773,9 @@ def main(argv: list[str] | None = None) -> int:
                        normalize_audio=args.normalize, preview_seconds=args.preview_seconds,
                        preview_start=parse_time(args.preview_start), auto_preview=args.auto_preview,
                        settings=load_comment_settings(args.settings),
-                       output_dir=getattr(args, "output_dir", None))
+                       output_dir=getattr(args, "output_dir", None),
+                       cache_dir=getattr(args, "cache_dir", None),
+                       work_dir=getattr(args, "work_dir", None))
         print(f"処理時間: {time.monotonic() - started:.1f}秒")
         print(f"完成動画: {path}")
         return 0
