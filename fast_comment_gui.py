@@ -369,14 +369,21 @@ class FastCommentGUI:
         update()
 
     def _build_log_tab(self):
-        ttk.Label(self.tab_logs, text="変換の進捗ログ").pack(anchor="w")
+        ttk.Label(self.tab_logs, text="処理状況（進捗率は画面上部に常時表示）").pack(anchor="w")
+        ttk.Label(self.tab_logs, text="通常は必要なメッセージのみ表示します。エラー時はFFmpegの診断情報を表示します。",
+                  foreground="#555").pack(anchor="w", pady=(3, 0))
         box = ttk.Frame(self.tab_logs)
         box.pack(fill="both", expand=True, pady=8)
-        self.log = tk.Text(box, wrap="word", font=("Consolas", 10), state="disabled")
-        self.log.pack(side="left", fill="both", expand=True)
-        bar = ttk.Scrollbar(box, command=self.log.yview)
-        bar.pack(side="right", fill="y")
-        self.log.configure(yscrollcommand=bar.set)
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+        # Long FFmpeg command lines no longer wrap into dozens of fake log rows.
+        self.log = tk.Text(box, wrap="none", font=("Consolas", 10), state="disabled")
+        self.log.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(box, orient="vertical", command=self.log.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(box, orient="horizontal", command=self.log.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.log.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
 
     def _browse(self, variable, title, filetypes):
         path = filedialog.askopenfilename(parent=self.root, title=title, filetypes=filetypes)
@@ -831,6 +838,8 @@ class FastCommentGUI:
         self._processed_seconds = 0.0
         self._last_speed = ""
         self.progressbar.configure(value=0)
+        self.progress_percent.set("準備中")
+        self.progress_detail.set("入力を確認・処理を開始しています")
         self.start_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self.tabs.select(self.tab_logs)
@@ -893,15 +902,36 @@ class FastCommentGUI:
             self._terminate_worker(proc)
 
     def _read_progress(self, line: str):
-        """Progress for encoding; download stages do not pretend to have an ETA."""
+        """Keep the prominent progress gauge up to date, independent of log tab."""
+        if line.startswith("FC_PROGRESS|"):
+            # New worker emits a compact single line instead of FFmpeg's 12+
+            # progress key/value lines every few seconds.
+            fields = line.split("|", 2)
+            if len(fields) == 3:
+                try:
+                    self._processed_seconds = core.parse_time(fields[1])
+                except ValueError:
+                    pass
+                self._last_speed = fields[2].strip()
+                self._update_progress_display()
+            return
         if "videodownload を開始" in line:
-            self.status.set("動画をダウンロード中…（完了時間は計測できません）")
+            self.status.set("動画をダウンロード中…")
+            if hasattr(self, "progress_percent"):
+                self.progress_percent.set("取得中")
+                self.progress_detail.set("動画の取得中・完了時刻は未計測")
         elif "chatdownload を開始" in line:
-            self.status.set("チャットをダウンロード中…")
+            self.status.set("コメントをダウンロード中…")
+            if hasattr(self, "progress_percent"):
+                self.progress_percent.set("取得中")
+                self.progress_detail.set("チャット取得中")
         elif line.startswith("エンコード方式:"):
             self._processed_seconds = 0.0
             self._last_speed = ""
-            self.status.set(f"{line} — 開始しました")
+            self.status.set(f"{line} — 開始")
+            if hasattr(self, "progress_percent"):
+                self.progress_percent.set("0%")
+                self.progress_detail.set("速度 計測中 / 残り時間 計測中")
         if line.startswith("動画:") and self._total_seconds is None:
             match = re.search(r"時間:\s*([0-9.]+)秒", line)
             if match:
@@ -913,12 +943,33 @@ class FastCommentGUI:
                 pass
         if line.startswith("speed="):
             self._last_speed = line.partition("=")[2].strip()
-        if line == "progress=continue" and self._total_seconds:
-            percent = min(99.0, 100 * self._processed_seconds / self._total_seconds)
+        if line == "progress=continue":
+            self._update_progress_display()
+        elif line == "progress=end":
+            self._show_finalizing()
+
+    def _update_progress_display(self):
+        if self._total_seconds:
+            percent = min(99.0, max(0.0, 100 * self._processed_seconds / self._total_seconds))
             self.progressbar.configure(value=percent)
+            if hasattr(self, "progress_percent"):
+                self.progress_percent.set(f"{percent:.1f}%")
             eta = remaining_seconds(self._total_seconds, self._processed_seconds, self._last_speed)
-            remaining = f" — 残り約 {format_duration(eta)}" if eta is not None else " — 残り時間を計測中"
-            self.status.set(f"エンコード中 {percent:.0f}% — 速度 {self._last_speed or '計測中'}{remaining}")
+            remaining = f"残り約 {format_duration(eta)}" if eta is not None else "残り時間 計測中"
+        else:
+            remaining = "残り時間 未計測"
+            if hasattr(self, "progress_percent"):
+                self.progress_percent.set("計測中")
+        speed = self._last_speed if self._last_speed not in ("", "N/A") else "計測中"
+        if hasattr(self, "progress_detail"):
+            self.progress_detail.set(f"速度 {speed} / {remaining}")
+        self.status.set("エンコード中")
+
+    def _show_finalizing(self):
+        if hasattr(self, "progress_percent"):
+            self.progress_percent.set("保存中")
+            self.progress_detail.set("エンコード終了・完成動画を保存中")
+        self.status.set("最終保存中（完了するまで終了しないでください）")
 
     def poll(self):
         while True:
@@ -932,7 +983,7 @@ class FastCommentGUI:
                     if candidate.is_file():
                         self._completed_file = candidate
                 self._read_progress(payload)
-                if not (payload.startswith(("frame=", "fps=", "out_time=", "speed=", "bitrate=", "total_size=", "out_time_ms=", "out_time_us=", "dup_frames=", "drop_frames=", "stream_", "progress="))):
+                if not (payload.startswith(("FC_PROGRESS|", "frame=", "fps=", "out_time=", "speed=", "bitrate=", "total_size=", "out_time_ms=", "out_time_us=", "dup_frames=", "drop_frames=", "stream_", "progress="))):
                     self.append(payload)
             elif event == "preview_loaded":
                 entries, start, filename = payload
@@ -985,6 +1036,11 @@ class FastCommentGUI:
                 cancelled = event == "cancelled"
                 success = event == "done" and payload == 0
                 self.progressbar.configure(value=100 if success else 0)
+                if hasattr(self, "progress_percent"):
+                    self.progress_percent.set("100%" if success else ("中止" if cancelled else "エラー"))
+                    self.progress_detail.set(
+                        "完成動画を保存しました" if success else
+                        ("元動画は残しています" if cancelled else "処理ログを確認してください"))
                 self.status.set("中止しました。元動画は残しています" if cancelled else (
                     "変換完了。出力フォルダを確認してください" if success else
                     "失敗しました。ログを確認してください"))
