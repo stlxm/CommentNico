@@ -7,6 +7,8 @@ Independent Windows application for Twitch VOD acquisition and comments overlay.
 - Normally supply a Twitch VOD ID / video URL; acquire video and chat automatically and reuse cached files.
 - Optionally select both an existing MP4 and chat JSON without a VOD ID.
 - Live GUI preview: font size, speed, layout, row spacing, user colors, and collision settings.
+- More accurately scaled on-screen text: Tk uses pixel font sizes matching FFmpeg/libass scale rather than DPI-scaled point sizes.
+- A **実際のFFmpeg描画で1コマ確認** button showing a genuine video frame with libass-rendered comments before final export.
 - MP4 comments burned into the video using NVIDIA NVENC (CPU fallback) or MKV with switchable ASS subtitles.
 - Audio loudness normalization and selectable 30-second previews from chat-active scenes.
 - A custom output directory you can browse to and save across restarts.
@@ -41,6 +43,18 @@ Before first launch, copy the following three files from your *existing working*
 Run `FastComment.exe`. Keep the two EXEs and tools folder together. Neither your old Saccubus/Java folder nor a standalone Python installation should be needed at runtime.
 
 The new user data location is `%LOCALAPPDATA%\FastComment` (or set `FASTCOMMENT_DATA_DIR`).
+
+## Comparing live preview and the actual MP4
+
+The live comment preview is instant and interactive, but approximates how FFmpeg/libass rasterizes fonts and shadows. On the **② コメント設定とプレビュー** tab:
+
+1. Choose the VOD, a downloaded MP4 and chat JSON on **① 動画・出力**. Files already cached for the VOD are recognized.
+2. Set the comment size, color, speed, and spacing while the live preview animates.
+3. Click **実際のFFmpeg描画で1コマ確認** for a frame rendered through the **same libass filter** used by the final exported video. This takes a moment and requires a local video and JSON. It uses the 30s test's automatic dense-comment region, or your chosen start time.
+4. If you change a setting, FastComment switches back to live preview; click the actual-frame button again to see the revised FFmpeg result.
+5. Click **ライブ表示に戻す** to resume animation.
+
+The actual-frame button shows **one frame**, not motion. For final timing / overlap / appearance, run the 30-second MP4 test. The sample messages in live preview are demonstrations, not your stream's real comments; choose **実コメントから再生** to see real messages.
 
 ## Choosing and saving your output folder
 
