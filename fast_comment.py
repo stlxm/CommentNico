@@ -76,7 +76,7 @@ def _execute_ffmpeg_with_compact_progress(
                         last_report = now
                 continue
             recent.append(line)
-            if re.search(r"\\b(error|warning|failed|invalid|unable|cannot)\\b", line, re.IGNORECASE):
+            if re.search(r"(error|warning|failed|invalid|unable|cannot)", line, re.IGNORECASE):
                 print("[FFmpeg] " + line, flush=True)
         returncode = proc.wait()
     if returncode:
