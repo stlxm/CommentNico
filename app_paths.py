@@ -17,6 +17,7 @@ OUTPUT_DIR = DATA_DIR / "Output"
 SETTINGS_FILE = DATA_DIR / "comment_settings.json"
 LOG_DIR = DATA_DIR / "logs"
 OUTPUT_PREFERENCES_FILE = DATA_DIR / "output_preferences.json"
+STORAGE_PREFERENCES_FILE = DATA_DIR / "storage_preferences.json"
 
 
 def resolve_output_directory(value: str | Path) -> Path:
@@ -60,6 +61,37 @@ def save_output_preferences(prefs: OutputPreferences, path: Path = OUTPUT_PREFER
     ) + "\n", encoding="utf-8")
     temporary.replace(path)
 
+
+
+@dataclass
+class StoragePreferences:
+    cache_directory: str = str(CACHE_DIR)
+
+
+def load_storage_preferences(path: Path = STORAGE_PREFERENCES_FILE) -> StoragePreferences:
+    if not path.is_file():
+        return StoragePreferences()
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict) or not isinstance(data.get("cache_directory"), str):
+        raise ValueError("元動画の保存先設定が正しくありません")
+    return StoragePreferences(str(resolve_output_directory(data["cache_directory"])))
+
+
+def save_storage_preferences(prefs: StoragePreferences, path: Path = STORAGE_PREFERENCES_FILE) -> None:
+    folder = resolve_output_directory(prefs.cache_directory)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text(json.dumps({"cache_directory": str(folder)},
+                                        ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def work_directory_for_output(directory: str | Path) -> Path:
+    """Temporary encoding files follow the chosen output drive, not C:\\Users."""
+    return resolve_output_directory(directory) / ".FastComment-work"
 
 
 def completed_output_folder(completed_file: Path | None, directory: str | Path) -> Path:
