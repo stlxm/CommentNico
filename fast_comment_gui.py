@@ -903,6 +903,9 @@ class FastCommentGUI:
 
     def _read_progress(self, line: str):
         """Keep the prominent progress gauge up to date, independent of log tab."""
+        if line == "FC_FINALIZING":
+            self._show_finalizing()
+            return
         if line.startswith("FC_PROGRESS|"):
             # New worker emits a compact single line instead of FFmpeg's 12+
             # progress key/value lines every few seconds.
@@ -983,7 +986,7 @@ class FastCommentGUI:
                     if candidate.is_file():
                         self._completed_file = candidate
                 self._read_progress(payload)
-                if not (payload.startswith(("FC_PROGRESS|", "frame=", "fps=", "out_time=", "speed=", "bitrate=", "total_size=", "out_time_ms=", "out_time_us=", "dup_frames=", "drop_frames=", "stream_", "progress="))):
+                if not (payload.startswith(("FC_FINALIZING", "FC_PROGRESS|", "frame=", "fps=", "out_time=", "speed=", "bitrate=", "total_size=", "out_time_ms=", "out_time_us=", "dup_frames=", "drop_frames=", "stream_", "progress="))):
                     self.append(payload)
             elif event == "preview_loaded":
                 entries, start, filename = payload
