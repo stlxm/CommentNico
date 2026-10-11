@@ -727,7 +727,7 @@ class FastCommentGUI:
                 cw = max(1, self.canvas.winfo_width())
                 ch = max(1, self.canvas.winfo_height())
                 self.canvas.delete("comments")
-                if self._motion_preview_active and self._motion_frames:
+                if getattr(self, "_motion_preview_active", False) and self._motion_frames:
                     import base64
                     i = int((now - self._preview_started) * self._motion_fps) % len(self._motion_frames)
                     if i != self._motion_frame_index:
