@@ -928,7 +928,7 @@ def interactive() -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="TwitchコメントをASS字幕化し、高速に合成")
     parser.add_argument("--vod", help="Twitchアーカイブ動画ID/URL")
-    parser.add_argument("--video", type=Path, help="取得済みMP4（再ダウンロードを省略）")
+    parser.add_argument("--video", type=Path, help="取得済み動画（OBSのMKV/MP4等。再ダウンロードを省略）")
     parser.add_argument("--chat", type=Path, help="取得済みチャットJSON（再ダウンロードを省略）")
     parser.add_argument("--style", choices=["nico", "twitch"], default="nico")
     parser.add_argument("--position", choices=["left", "right"], default="right")
