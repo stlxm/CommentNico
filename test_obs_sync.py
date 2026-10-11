@@ -29,6 +29,12 @@ class ObsOffsetTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     core.parse_comment_offset(value)
 
+    def test_matching_scene_time_calculator(self):
+        self.assertEqual(core.offset_between_matching_events("00:04:20", "00:04:05"), 15.0)
+        self.assertEqual(core.offset_between_matching_events("04:05", "04:20"), -15.0)
+        with self.assertRaises(ValueError):
+            core.offset_between_matching_events("not time", "00:04:05")
+
     def test_positive_offset_delays_chat_on_obs_recording(self):
         entries = [sample(5.0)]
         events, _ = core.layout_comments(entries, 1280, 720,
