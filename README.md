@@ -6,9 +6,9 @@ Independent Windows application for Twitch VOD acquisition and comments overlay.
 
 - Normally supply a Twitch VOD ID / video URL; acquire video and chat automatically and reuse cached files.
 - Optionally select both an existing MP4 and chat JSON without a VOD ID.
-- Live GUI preview: font size, speed, layout, row spacing, user colors, and collision settings.
+- An accurately rendered animated sample with font size, speed, spacing, colors and collision settings.
 - More accurately scaled on-screen text: Tk uses pixel font sizes matching FFmpeg/libass scale rather than DPI-scaled point sizes.
-- A **実際のFFmpeg描画で1コマ確認** button showing a genuine video frame with libass-rendered comments before final export.
+- An automatically refreshing **8-second sample video** rendered through the actual FFmpeg/libass export pipeline; no MP4/JSON needed. The source-video still preview remains optional.
 - MP4 comments burned into the video using NVIDIA NVENC (CPU fallback) or MKV with switchable ASS subtitles.
 - Audio loudness normalization and selectable 30-second previews from chat-active scenes.
 - A custom output directory you can browse to and save across restarts.
@@ -45,25 +45,24 @@ Run `FastComment.exe`. Keep the two EXEs and tools folder together. Neither your
 
 The new user data location is `%LOCALAPPDATA%\FastComment` (or set `FASTCOMMENT_DATA_DIR`).
 
-## Finishing FastComment before final preview tuning
+## Accurate sample video preview (no VOD needed)
 
-FastComment currently focuses on a safe normal workflow: VOD ID, cached MP4/JSON reuse, optional output folder, a 30-second burn-in before full export, and NVENC on supported GPUs.
+On the **② コメント設定とプレビュー** tab, an **8-second moving sample video** is generated automatically when you open the app. Unlike the previous instant Tk text animation, each frame is produced by the very same **ASS layout and FFmpeg/libass filter** used for the burned-in MP4. The demo video uses a generated moving background (`testsrc2`) and example Twitch-style comments. You do not need to select, download or prepare an MP4/JSON.
 
-Progress is a **time estimate**, not a guarantee; it is only shown while FFmpeg publishes an actual `speed=...x` measurement. Downloads and initial preparation show stages instead. Pressing **中止** stops the worker (and its child processes on Windows) without intentionally deleting original videos. A cancelled conversion is not reported as a failed codec.
+Changing the font size, color, speed, row spacing, display area or collision mode automatically rebuilds the sample after a short pause. Rendering takes a moment; older results are discarded rather than showing text with stale settings. The video loops within the GUI at **12 frames per second**, with pause/resume support.
 
-The final task in the release checklist is to compare live preview font size/movement to the FFmpeg MP4 export. A one-frame still cannot demonstrate movement. We are intentionally deferring this polish until download, long-running conversion, save/cancel, and safe migration have been verified.
+- **▶ サンプル動画を再生・更新**: manually regenerate the sample with current settings.
+- **実コメントから再生**: switch to the lightweight demonstration based on actual JSON (requires local chat data).
+- **実配信の1コマを確認（任意）**: inspect a still rendered from an MP4 and JSON.
+- **ライブ表示に戻す**: switch back to low-cost approximated live animation.
 
-## Comparing live preview and the actual MP4
+Text size, outline, color and movement in the moving sample follow FFmpeg at 1280×720 before being scaled to 640×360 for display. Real videos with unusual aspect ratios, frame rates, different font availability or other source-specific characteristics may still need a 30-second burn-in for final confirmation.
 
-The live comment preview is instant and interactive, but approximates how FFmpeg/libass rasterizes fonts and shadows. On the **② コメント設定とプレビュー** tab:
+## Storage for originals and temporary renders
 
-1. Choose the VOD, a downloaded MP4 and chat JSON on **① 動画・出力**. Files already cached for the VOD are recognized.
-2. Set the comment size, color, speed, and spacing while the live preview animates.
-3. Click **実際のFFmpeg描画で1コマ確認** for a frame rendered through the **same libass filter** used by the final exported video. This takes a moment and requires a local video and JSON. It uses the 30s test's automatic dense-comment region, or your chosen start time.
-4. If you change a setting, FastComment switches back to live preview; click the actual-frame button again to see the revised FFmpeg result.
-5. Click **ライブ表示に戻す** to resume animation.
+The **① 動画・出力** tab also lets you choose a **元動画・JSON保存先** folder, saved separately from output preferences. This avoids accumulating multi-gigabyte Twitch downloads on C:. **Changing the folder does not move existing files**; you can point to your existing `Originals` folder or copy files later if desired.
 
-The actual-frame button shows **one frame**, not motion. For final timing / overlap / appearance, run the 30-second MP4 test. The sample messages in live preview are demonstrations, not your stream's real comments; choose **実コメントから再生** to see real messages.
+When exporting MP4/MKV, large temporary renders use a hidden `.FastComment-work` directory inside the selected output root, usually on the same drive. Temporary encoding directories are removed on normal completion; after forced termination, leftovers might require manual cleanup after confirming no conversion is running. Low disk space is checked before processing.
 
 ## Choosing and saving your output folder
 
