@@ -457,45 +457,67 @@ def render_exact_preview_frame(
 
 
 
-def render_motion_preview(
-    video: Path, chat: Path, *, settings: CommentSettings, style: str,
-    start_seconds: float, duration_seconds: float = 8.0,
-    fps: int = 12, width: int = 640, height: int = 360,
-    work_dir: Path | None = None
-) -> tuple[list[bytes], int, int]:
-    """Create a short true FFmpeg/libass animation; no video re-encode output.
 
-    ASS is generated at source resolution and composited BEFORE scaling, just
-    like the full video. Each PNG is one actual output frame, not Tk fake text.
-    12 fps is a display-performance compromise and differs from video fps.
+def render_motion_preview(
+    video: Path | None, chat: Path | None, *, settings: CommentSettings, style: str,
+    start_seconds: float = 0.0, duration_seconds: float = 8.0,
+    fps: int = 12, width: int = 640, height: int = 360,
+    work_dir: Path | None = None, sample_entries: list[dict] | None = None
+) -> tuple[list[bytes], int, int]:
+    """Render sample or real moving comments with FFmpeg's final ASS engine.
+
+    When sample_entries are provided, FFmpeg generates an animated sample
+    background itself. No MP4/JSON is required from the user.
     """
     if not (1 <= fps <= 24 and 1 <= duration_seconds <= 15):
         raise ValueError("動くプレビューの時間またはFPSが不正です")
     ffmpeg = tool("ffmpeg")
-    w, h, duration = video_metadata(video, tool("ffprobe"))
-    start = parse_time(start_seconds)
-    if duration is not None and start >= duration:
-        raise ValueError("プレビュー開始位置が動画の終了より後です")
-    available = duration_seconds if duration is None else min(duration_seconds, duration-start)
+    using_sample = sample_entries is not None
+    if using_sample:
+        source_width, source_height = 1280, 720
+        start = 0.0
+        available = float(duration_seconds)
+    else:
+        if video is None or chat is None:
+            raise ValueError("配信動画のプレビューには動画とJSONの両方が必要です")
+        source_width, source_height, source_duration = video_metadata(video, tool("ffprobe"))
+        start = parse_time(start_seconds)
+        if source_duration is not None and start >= source_duration:
+            raise ValueError("プレビュー開始位置が動画の終了より後です")
+        available = (duration_seconds if source_duration is None else
+                     min(duration_seconds, source_duration-start))
     if available <= 0:
         raise ValueError("プレビュー対象の動画が短すぎます")
+
     from app_paths import DATA_DIR
     work_root = resolve_output_directory(work_dir) if work_dir is not None else DATA_DIR
     work_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="fast_motion_", dir=work_root) as temp:
         work = Path(temp)
         ass = work / "comments.ass"
+        if using_sample:
+            chat = work / "sample.json"
+            chat.write_text(json.dumps({"comments": sample_entries}, ensure_ascii=False), encoding="utf-8")
         count, dropped = convert_chat_to_ass(
-            chat, ass, w, h, Options(style, "right", float(available), start, settings))
-        command = [ffmpeg, "-hide_banner", "-loglevel", "error",
-                   "-ss", str(start), "-i", str(video),
-                   "-t", str(available), "-an",
-                   "-vf", f"setpts=PTS-STARTPTS,ass=comments.ass,fps={fps},scale={int(width)}:{int(height)}",
-                   "-frames:v", str(math.ceil(available * fps)),
-                   "-fps_mode", "vfr", "-y", "frame_%04d.png"]
-        result = subprocess.run(command, cwd=work, capture_output=True,
-                                text=True, errors="replace", timeout=180,
-                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            chat, ass, source_width, source_height,
+            Options(style, "right", float(available), start, settings))
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+        if using_sample:
+            # Moving sample background; compositing resolution equals output
+            # layout resolution BEFORE scaling, exactly as in an MP4 burn-in.
+            command += ["-f", "lavfi", "-i",
+                        f"testsrc2=size=1280x720:rate={fps}:duration={available}"]
+        else:
+            command += ["-ss", str(start), "-i", str(video)]
+        command += [
+            "-t", str(available), "-an",
+            "-vf", f"setpts=PTS-STARTPTS,ass=comments.ass,fps={fps},scale={int(width)}:{int(height)}",
+            "-frames:v", str(math.ceil(available * fps)),
+            "-fps_mode", "vfr", "-y", "frame_%04d.png"
+        ]
+        result = subprocess.run(
+            command, cwd=work, capture_output=True, text=True, errors="replace",
+            timeout=180, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         if result.returncode != 0:
             raise RuntimeError("動くプレビューの生成に失敗しました: " + (result.stderr or "")[-800:])
         files = sorted(work.glob("frame_*.png"))
