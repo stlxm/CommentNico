@@ -72,5 +72,36 @@ class AccurateMovingSampleTests(unittest.TestCase):
         self.assertFalse(instance._sample_preview_active)
 
 
+    def test_tk_player_switches_actual_rendered_frames_without_fake_text(self):
+        instance = object.__new__(gui.FastCommentGUI)
+        instance.canvas = MagicMock()
+        instance.canvas.winfo_exists.return_value = True
+        instance.canvas.winfo_width.return_value = 640
+        instance.canvas.winfo_height.return_value = 360
+        instance.root = MagicMock()
+        instance._sample_preview_active = True
+        instance._sample_preview_frames = [b"first", b"second"]
+        instance._sample_preview_fps = 10
+        instance._sample_preview_index = -1
+        instance._sample_preview_image = None
+        instance._sample_preview_pending = False
+        instance._preview_started = 50.0
+        instance._preview_paused_at = 50.0
+        instance._preview_span = 14.0
+        instance._preview_events = []
+        instance._exact_preview_active = False
+        instance._redraw_background = MagicMock()
+        with patch.object(gui.tk, "PhotoImage", side_effect=["first_image", "second_image"]) as factory:
+            instance._animate_preview()
+            self.assertEqual(instance._sample_preview_index, 0)
+            instance._preview_paused_at = 50.11
+            instance._animate_preview()
+            self.assertEqual(instance._sample_preview_index, 1)
+            self.assertEqual(factory.call_count, 2)
+        instance._redraw_background.assert_called()
+        instance.canvas.create_text.assert_not_called()
+
+
+
 if __name__ == "__main__":
     unittest.main()
