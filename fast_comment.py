@@ -73,6 +73,8 @@ def _execute_ffmpeg_with_compact_progress(
                     if value == "end" or now - last_report >= 5.0:
                         # All progress data in one line; the GUI owns percent/ETA.
                         print(f"FC_PROGRESS|{out_time}|{speed}", flush=True)
+                        if value == "end":
+                            print("FC_FINALIZING", flush=True)
                         last_report = now
                 continue
             recent.append(line)
