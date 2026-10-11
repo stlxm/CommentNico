@@ -49,6 +49,19 @@ COLORS = {"twitch": "Twitchのユーザー色", "white": "全員白", "single": 
           "account": "アカウント別・自動色", "manual": "アカウント別・手動指定"}
 
 
+def sample_entries_for_settings(settings: core.CommentSettings) -> list[dict]:
+    """Show registered per-user manual colors in the sample video too."""
+    if settings.color_mode != "manual" or not settings.account_colors:
+        return SAMPLE_ENTRIES
+    accounts = sorted(settings.account_colors)[:len(SAMPLE_ENTRIES)]
+    return [
+        {**entry,
+         "commenter": {"name": accounts[i % len(accounts)],
+                       "display_name": accounts[i % len(accounts)]}}
+        for i, entry in enumerate(SAMPLE_ENTRIES)
+    ]
+
+
 class FastCommentGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -575,7 +588,7 @@ class FastCommentGUI:
         self.preview_note.set("FFmpegで8秒間のサンプル動画を生成中…")
         def job():
             try:
-                frames, fps, count = core.render_sample_video_preview(SAMPLE_ENTRIES, cfg, style)
+                frames, fps, count = core.render_sample_video_preview(sample_entries_for_settings(cfg), cfg, style)
                 self.events.put(("sample_preview_loaded", (generation, frames, fps, count)))
             except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 self.events.put(("sample_preview_error", (generation, str(exc))))
