@@ -548,6 +548,9 @@ class FastCommentGUI:
 
     def return_live_preview(self):
         had_image = self._exact_preview_active or self._sample_preview_active
+        if self._sample_preview_job is not None:
+            self.root.after_cancel(self._sample_preview_job)
+            self._sample_preview_job = None
         self._exact_preview_active = False
         self._sample_preview_active = False
         self._sample_preview_pending = False
