@@ -507,6 +507,54 @@ def render_sample_comment_preview(
         return count
 
 
+
+def render_sample_video_preview(
+    entries: list[dict], settings: CommentSettings, style: str, *,
+    seconds: float = 8.0, fps: int = 12, width: int = 640, height: int = 360
+) -> tuple[list[bytes], int, int]:
+    """Return animated sample frames rendered by the *export* ASS/FFmpeg path.
+
+    No user MP4 or Twitch chat is required. The generated scene moves while
+    real ASS captions pass across it. Render at 1280x720 before downscaling,
+    mirroring how full video exports use libass at video resolution.
+    """
+    if not (1.0 <= seconds <= 12.0 and 6 <= fps <= 24):
+        raise ValueError("サンプル動画の秒数またはFPSが不正です")
+    ffmpeg = tool("ffmpeg")
+    from app_paths import DATA_DIR
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="fast_sample_video_", dir=DATA_DIR) as tmp:
+        work = Path(tmp)
+        sample_json = work / "demo.json"
+        sample_json.write_text(json.dumps({"comments": entries}, ensure_ascii=False), encoding="utf-8")
+        ass_path = work / "comments.ass"
+        count, _ = convert_chat_to_ass(
+            sample_json, ass_path, 1280, 720,
+            Options(style, "right", seconds, 0.0, settings)
+        )
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i",
+            f"testsrc2=size=1280x720:rate={fps}:duration={seconds:g}",
+            "-an",
+            "-vf", f"setpts=PTS-STARTPTS,ass=comments.ass,scale={width}:{height},format=rgb24",
+            "-frames:v", str(math.ceil(seconds * fps)),
+            "-y", "frame_%04d.png"
+        ]
+        completed = subprocess.run(
+            command, cwd=work, capture_output=True, text=True,
+            errors="replace", timeout=180,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        )
+        if completed.returncode:
+            raise RuntimeError(
+                "サンプル動画の生成に失敗しました: " + (completed.stderr or "")[-900:])
+        paths = sorted(work.glob("frame_*.png"))
+        if not paths:
+            raise RuntimeError("サンプル動画のフレームが生成されませんでした")
+        return [p.read_bytes() for p in paths], fps, count
+
+
 def encoder_candidates(ffmpeg: str, prefer: str) -> list[tuple[str, list[str]]]:
     if prefer == "cpu":
         return [("CPU/libx264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])]
