@@ -21,6 +21,7 @@ import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 import fast_comment as core
+from job_control import remaining_seconds, format_duration
 from app_paths import (APP_DIR, CACHE_DIR, OUTPUT_DIR, SETTINGS_FILE, worker_command,
                        OutputPreferences, load_output_preferences, save_output_preferences,
                        resolve_output_directory, completed_output_folder)
@@ -74,6 +75,7 @@ class FastCommentGUI:
         self.preview_note = tk.StringVar(value="サンプルコメントを再生中（エンコード不要）")
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.busy = False
+        self._cancel_event = threading.Event()
         self._total_seconds = None
         self._processed_seconds = 0.0
         self._last_speed = ""
@@ -686,6 +688,7 @@ class FastCommentGUI:
             elif self.time_mode.get() == "manual":
                 args += ["--preview-start", self.start_time.get()]
         self._completed_file = None
+        self._cancel_event.clear()
         self.busy = True
         self._total_seconds = 30.0 if self.preview.get() else None
         self._processed_seconds = 0.0
@@ -697,41 +700,71 @@ class FastCommentGUI:
         self.status.set("処理中 — ログタブで進捗確認できます（中止可能）")
         self.append("=" * 40)
         self.append("開始しました。コメント設定は変換開始時の内容で保存されています。")
-        def job():
-            try:
-                kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
-                          "text": True, "errors": "replace", "bufsize": 1}
-                if os.name == "nt":
-                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                self.worker_process = subprocess.Popen(args, **kwargs)
-                assert self.worker_process.stdout is not None
-                for line in self.worker_process.stdout:
-                    self.events.put(("log", line.rstrip("\r\n")))
-                self.events.put(("done", self.worker_process.wait()))
-            except (ValueError, OSError) as exc:
-                self.events.put(("error", str(exc)))
-            finally:
-                self.worker_process = None
-        threading.Thread(target=job, daemon=True).start()
+        threading.Thread(target=self._run_worker, args=(args,), daemon=True).start()
+
+    @staticmethod
+    def _terminate_worker(proc):
+        if proc.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True, timeout=15,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                proc.terminate()
+        except (OSError, subprocess.TimeoutExpired):
+            # The worker might already have exited while cancellation happened.
+            pass
+
+    def _run_worker(self, args):
+        """Run the converter; cancellation wins even if clicked before startup."""
+        proc = None
+        try:
+            if self._cancel_event.is_set():
+                self.events.put(("cancelled", None))
+                return
+            kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+                      "text": True, "errors": "replace", "bufsize": 1}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            proc = subprocess.Popen(args, **kwargs)
+            self.worker_process = proc
+            # Close the race between clicking Cancel and Popen completing.
+            if self._cancel_event.is_set():
+                self._terminate_worker(proc)
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                self.events.put(("log", line.rstrip("\r\n")))
+            exit_code = proc.wait()
+            self.events.put(("cancelled" if self._cancel_event.is_set() else "done", exit_code))
+        except (ValueError, OSError) as exc:
+            self.events.put(("cancelled" if self._cancel_event.is_set() else "error", str(exc)))
+        finally:
+            self.worker_process = None
 
     def cancel(self):
         if not self.busy:
             return
         if not messagebox.askyesno("処理を中止", "実行中の処理を中止しますか？元動画やJSONは削除されません。"):
             return
+        self._cancel_event.set()
         self.status.set("中止を要求しています…")
         self.cancel_button.configure(state="disabled")
         proc = self.worker_process
-        if proc is not None and proc.poll() is None:
-            # Windows taskkill /T terminates FFmpeg / TwitchDownloader child processes too.
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            else:
-                proc.terminate()
+        if proc is not None:
+            self._terminate_worker(proc)
 
     def _read_progress(self, line: str):
-        """Parse -progress pipe:1 output without treating it as completion."""
+        """Progress for encoding; download stages do not pretend to have an ETA."""
+        if "videodownload を開始" in line:
+            self.status.set("動画をダウンロード中…（完了時間は計測できません）")
+        elif "chatdownload を開始" in line:
+            self.status.set("チャットをダウンロード中…")
+        elif line.startswith("エンコード方式:"):
+            self._processed_seconds = 0.0
+            self._last_speed = ""
+            self.status.set(f"{line} — 開始しました")
         if line.startswith("動画:") and self._total_seconds is None:
             match = re.search(r"時間:\s*([0-9.]+)秒", line)
             if match:
@@ -746,7 +779,9 @@ class FastCommentGUI:
         if line == "progress=continue" and self._total_seconds:
             percent = min(99.0, 100 * self._processed_seconds / self._total_seconds)
             self.progressbar.configure(value=percent)
-            self.status.set(f"エンコード中 {percent:.0f}% — 速度 {self._last_speed or '計測中'}")
+            eta = remaining_seconds(self._total_seconds, self._processed_seconds, self._last_speed)
+            remaining = f" — 残り約 {format_duration(eta)}" if eta is not None else " — 残り時間を計測中"
+            self.status.set(f"エンコード中 {percent:.0f}% — 速度 {self._last_speed or '計測中'}{remaining}")
 
     def poll(self):
         while True:
@@ -790,10 +825,13 @@ class FastCommentGUI:
                 self.busy = False
                 self.start_button.configure(state="normal")
                 self.cancel_button.configure(state="disabled")
+                cancelled = event == "cancelled"
                 success = event == "done" and payload == 0
                 self.progressbar.configure(value=100 if success else 0)
-                self.status.set("変換完了。出力フォルダを確認してください" if success else "失敗しました。ログを確認してください")
-                self.append("正常終了" if success else f"処理失敗：{payload}")
+                self.status.set("中止しました。元動画は残しています" if cancelled else (
+                    "変換完了。出力フォルダを確認してください" if success else
+                    "失敗しました。ログを確認してください"))
+                self.append("処理を中止しました" if cancelled else ("正常終了" if success else f"処理失敗：{payload}"))
                 if success and self.open_on_complete.get():
                     try:
                         target = completed_output_folder(self._completed_file, self.output_directory.get())
