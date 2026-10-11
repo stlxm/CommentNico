@@ -62,6 +62,13 @@ def save_output_preferences(prefs: OutputPreferences, path: Path = OUTPUT_PREFER
 
 
 
+def completed_output_folder(completed_file: Path | None, directory: str | Path) -> Path:
+    """Open the actual streamer subfolder when the completed video is known."""
+    if completed_file is not None and completed_file.is_file():
+        return completed_file.parent
+    return resolve_output_directory(directory)
+
+
 def executable(name: str) -> str:
     """Use bundled copies first; never search an adjacent legacy Saccubus install."""
     names = (name + ".exe", name) if not name.endswith(".exe") else (name,)
