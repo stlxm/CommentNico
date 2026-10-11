@@ -414,6 +414,48 @@ def convert_chat_to_ass(chat: Path, out: Path, width: int, height: int,
     return len(events), collision_count
 
 
+
+def render_exact_preview_frame(
+    video: Path, chat: Path, out: Path, *, settings: CommentSettings, style: str,
+    start_seconds: float, frame_seconds: float = 5.0,
+    width: int = 640, height: int = 360
+) -> tuple[int, int, float]:
+    """Render one real source frame with the same libass filter used for export."""
+    ffmpeg = tool("ffmpeg")
+    video_width, video_height, duration = video_metadata(video, tool("ffprobe"))
+    start = parse_time(start_seconds)
+    if duration is not None and start >= duration:
+        raise ValueError("プレビュー開始位置が動画の終了時刻を超えています")
+    frame = max(0.0, float(frame_seconds))
+    if duration is not None:
+        frame = min(frame, max(0.0, duration - start - 0.15))
+    span = max(14.0, frame + 1.0)
+    from app_paths import DATA_DIR
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="fast_actual_preview_", dir=DATA_DIR) as temp:
+        work = Path(temp)
+        ass = work / "comments.ass"
+        count, dropped = convert_chat_to_ass(
+            chat, ass, video_width, video_height,
+            Options(style, "right", span, start, settings)
+        )
+        select = format(frame, ".3f").rstrip("0").rstrip(".") or "0"
+        video_filter = (
+            f"setpts=PTS-STARTPTS,ass=comments.ass,"
+            f"select=gte(t\\\\,{select}),scale={int(width)}:{int(height)}"
+        )
+        # Apply libass at every decoded frame, then select the chosen instant.
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "error",
+               "-ss", str(start), "-i", str(video), "-an",
+               "-vf", video_filter, "-frames:v", "1", "-fps_mode", "vfr",
+               "-y", str(out)]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        execute(cmd, cwd=work, quiet=True)
+        if not out.is_file() or out.stat().st_size == 0:
+            raise RuntimeError("FFmpegでプレビュー画像を生成できませんでした")
+    return count, dropped, frame
+
+
 def encoder_candidates(ffmpeg: str, prefer: str) -> list[tuple[str, list[str]]]:
     if prefer == "cpu":
         return [("CPU/libx264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])]
