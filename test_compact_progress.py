@@ -42,6 +42,7 @@ class CompactFFmpegOutputTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, 1)
         text = output.getvalue()
         self.assertEqual(text.count("FC_PROGRESS|"), 2)
+        self.assertIn("FC_FINALIZING", text)
         self.assertIn("FC_PROGRESS|00:00:10.000|2.5x", text)
         self.assertIn("FC_PROGRESS|00:00:20.000|3.0x", text)
         self.assertIn("Warning: a test diagnostic", text)
