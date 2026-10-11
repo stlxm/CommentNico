@@ -960,7 +960,7 @@ def main(argv: list[str] | None = None) -> int:
                        position=args.position, mode=args.mode, prefer=args.encoder,
                        normalize_audio=args.normalize, preview_seconds=args.preview_seconds,
                        preview_start=parse_time(args.preview_start),
-                       comment_offset_seconds=parse_comment_offset(args.comment_offset), auto_preview=args.auto_preview,
+                       comment_offset_seconds=parse_comment_offset(getattr(args, "comment_offset", "0")), auto_preview=args.auto_preview,
                        settings=load_comment_settings(args.settings),
                        output_dir=getattr(args, "output_dir", None),
                        cache_dir=getattr(args, "cache_dir", None),
