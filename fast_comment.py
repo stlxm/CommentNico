@@ -6,6 +6,7 @@ This is an independent prototype: it never changes the original Saccubus files.
 from __future__ import annotations
 
 import argparse
+import errno
 import colorsys
 import hashlib
 import math
@@ -431,6 +432,44 @@ def encoder_candidates(ffmpeg: str, prefer: str) -> list[tuple[str, list[str]]]:
     return available + [cpu]
 
 
+def finalize_output(source: Path, destination: Path) -> None:
+    """Publish an encoded video safely, including across different Windows drives.
+
+    Path.replace cannot move C: -> D: on Windows (WinError 17).
+    For cross-drive writes, copy into a unique temporary file next to the
+    destination and only publish the completed file with a final rename.
+    """
+    if not source.is_file() or source.stat().st_size == 0:
+        raise ValueError(f"書き出した動画がありません: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise FileExistsError(f"保存先のファイルが既に存在します: {destination}")
+
+    try:
+        source.replace(destination)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV and getattr(exc, "winerror", None) != 17:
+            raise
+
+    print("[INFO] 保存先が別ドライブのため、完成動画をコピーしてから確定します。", flush=True)
+    with tempfile.NamedTemporaryFile(
+        prefix=".fastcomment_copy_", suffix=destination.suffix,
+        dir=destination.parent, delete=False
+    ) as handle:
+        staging = Path(handle.name)
+    try:
+        shutil.copy2(source, staging)
+        if staging.stat().st_size != source.stat().st_size or staging.stat().st_size == 0:
+            raise OSError("コピー後のファイルサイズが一致しません")
+        if destination.exists():
+            raise FileExistsError(f"保存先のファイルが既に存在します: {destination}")
+        staging.replace(destination)
+        source.unlink(missing_ok=True)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
 def render(ffmpeg: str, source: Path, ass: Path, dest: Path, work: Path,
            *, mode: str, prefer: str, normalize_audio: bool,
            preview_seconds: float | None, preview_start: float = 0.0) -> str:
@@ -448,7 +487,7 @@ def render(ffmpeg: str, source: Path, ass: Path, dest: Path, work: Path,
         execute(command + ["-y", str(temp_dest)], cwd=work)
         if not temp_dest.exists() or temp_dest.stat().st_size == 0:
             raise ValueError("MKVが空です")
-        temp_dest.replace(dest)
+        finalize_output(temp_dest, dest)
         return "映像・音声は無劣化コピー（字幕は対応プレイヤーのみ表示）"
 
     filters = execute([ffmpeg, "-hide_banner", "-filters"], quiet=True).stdout
@@ -479,13 +518,15 @@ def render(ffmpeg: str, source: Path, ass: Path, dest: Path, work: Path,
             print(f"\nエンコード方式: {label}", flush=True)
             execute(base + flags + ["-movflags", "+faststart", "-y", str(temp_dest)], cwd=work)
             video_metadata(temp_dest, tool("ffprobe"))
-            temp_dest.replace(dest)
-            return label
         except (subprocess.CalledProcessError, ValueError, OSError) as exc:
             errors.append(f"{label}: {exc}")
             temp_dest.unlink(missing_ok=True)
             if label != "CPU/libx264":
                 print("[WARN] GPUエンコード失敗。次の方式に切り替えます。")
+            continue
+        # An output-disk failure must not waste time retrying other encoders.
+        finalize_output(temp_dest, dest)
+        return label
     raise RuntimeError("すべてのエンコード方式が失敗しました。\n" + "\n".join(errors))
 
 

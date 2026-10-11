@@ -14,6 +14,20 @@ Independent Windows application for Twitch VOD acquisition and comments overlay.
 
 - Progress / logs and cancel button.
 
+## GitHub Desktop: update without downloading ZIPs
+
+This is the fastest way to use source changes and bug fixes. GitHub Desktop updates the **source**, not an existing packaged EXE.
+
+1. In GitHub Desktop choose **File → Clone repository** and select `stlxm/CommentNico` (branch **main**).
+2. Choose **Repository → Show in Explorer** to open that cloned directory.
+3. First run: double-click **`FastCommentを起動.cmd`**. It uses the Windows Python 3 installation (with Tkinter) and will try to **copy**, not move, the three existing tools from `FastComment2/tools` or other known locations. If not found, select your existing tools folder in the dialog. Python 3.11+ must already be installed.
+4. Every later update: **Fetch origin → Pull origin** in GitHub Desktop, close the old window and double-click **`FastCommentを起動.cmd`**. The updated Python source takes effect immediately; no ZIP, no EXE rebuild.
+5. To launch a **packaged EXE** instead, double-click **`EXEを更新して起動.cmd`**. This requires Python 3.11+ and PyInstaller (installed automatically on the first build). It rebuilds only if the source changed, stores the app in `release/FastComment`, and opens it. Builds may take a few minutes.
+
+All downloaded tools remain ignored by Git, in `tools/`; GitHub Desktop will not stage personal binaries. Settings and videos are stored outside the repository (in `%LOCALAPPDATA%/FastComment` unless the user chooses another output directory). Do **not** modify/delete the previous `D:/配信用/FastComment2` installation until the updated app is verified.
+
+**Cross-drive saving:** Exports can be written to D: while temporary encoding uses C:. A successful encode is copied to a temporary file on D:, then safely finalized without wasting time retrying other encoders.
+
 ## Getting a Windows test build (no Python install required)
 
 Open the **Actions** tab, select **Windows portable beta**, choose the latest successful run and download `FastComment-Windows-beta` under Artifacts. This artifact contains the new app's **FastComment.exe** and **FastCommentWorker.exe**, but to comply with third-party tool redistribution caution it does **not** bundle the external TwitchDownloader/FFmpeg executables.
