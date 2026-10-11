@@ -78,16 +78,17 @@ class FinalSamplePreviewTests(unittest.TestCase):
                 self.target = target
             def start(self):
                 self.target()
-        def fake_render(entries, settings, style, dest):
-            dest.write_bytes(b"png")
-            return 10
+        def fake_render(entries, settings, style):
+            return [b"png0", b"png1"], 12, 10
         with patch("fast_comment_gui.threading.Thread", ImmediateThread), \
-             patch.object(core, "render_sample_comment_preview", side_effect=fake_render):
+             patch.object(core, "render_sample_video_preview", side_effect=fake_render):
             instance.render_sample_preview()
         event, payload = instance.events.get_nowait()
         self.assertEqual(event, "sample_preview_loaded")
         self.assertEqual(payload[0], 3)
-        self.assertEqual(payload[1], b"png")
+        self.assertEqual(payload[1], [b"png0", b"png1"])
+        self.assertEqual(payload[2], 12)
+        self.assertEqual(payload[3], 10)
 
     def test_storage_preferences_roundtrip_and_scratch_on_output_disk(self):
         with tempfile.TemporaryDirectory() as td:
